@@ -23,6 +23,7 @@ class _DashboardAuditoriaScreenState extends State<DashboardAuditoriaScreen> {
   final TextEditingController _opexFijoController = TextEditingController();
   final TextEditingController _opexVariableController = TextEditingController();
   final TextEditingController _precioPpaController = TextEditingController();
+  final TextEditingController _escaladaPrecioController = TextEditingController();
   final TextEditingController _anoReemplazoController = TextEditingController();
   final TextEditingController _costeReemplazoController = TextEditingController();
 
@@ -42,7 +43,7 @@ class _DashboardAuditoriaScreenState extends State<DashboardAuditoriaScreen> {
   String capexTotalStr = '0,00', flujoCajaY1 = '0,00', totalGastosY1 = '0,00'; 
   
   String ingresosPpaLife = '0,00', ingresosMktLife = '0,00', costeRedLife = '0,00', opexLife = '0,00';
-  String reemplazoLife = '0,00', beneficioNetoLife = '0,00';
+  String reemplazoLife = '0,00', beneficioNetoLife = '0,00', beneficioNetoTotalLife = '0,00';
 
   List<FlSpot> roiSpots = [];
   double minRoiY = 0;
@@ -121,6 +122,7 @@ class _DashboardAuditoriaScreenState extends State<DashboardAuditoriaScreen> {
       _opexFijoController.text = prefs.getString('opex_fijo_aud') ?? '1500';
       _opexVariableController.text = prefs.getString('opex_var_aud') ?? '5';
       _precioPpaController.text = prefs.getString('precio_ppa_aud') ?? '40';
+      _escaladaPrecioController.text = prefs.getString('escalada_precio_aud') ?? '2';
       _anoReemplazoController.text = prefs.getString('ano_reemplazo_aud') ?? '12';
       _costeReemplazoController.text = prefs.getString('coste_reemplazo_aud') ?? '100000';
       _mercadoGlobalActivo = prefs.getBool('mercado_activo_aud') ?? true;
@@ -145,6 +147,7 @@ class _DashboardAuditoriaScreenState extends State<DashboardAuditoriaScreen> {
     await prefs.setString('opex_fijo_aud', _opexFijoController.text);
     await prefs.setString('opex_var_aud', _opexVariableController.text);
     await prefs.setString('precio_ppa_aud', _precioPpaController.text);
+    await prefs.setString('escalada_precio_aud', _escaladaPrecioController.text);
     await prefs.setString('ano_reemplazo_aud', _anoReemplazoController.text);
     await prefs.setString('coste_reemplazo_aud', _costeReemplazoController.text);
     await prefs.setBool('mercado_activo_aud', _mercadoGlobalActivo);
@@ -199,6 +202,7 @@ class _DashboardAuditoriaScreenState extends State<DashboardAuditoriaScreen> {
     double opexFijo = double.tryParse(_opexFijoController.text.replaceAll(',', '.')) ?? 1500;
     double opexVar = double.tryParse(_opexVariableController.text.replaceAll(',', '.')) ?? 5;
     double precioPpa = double.tryParse(_precioPpaController.text.replaceAll(',', '.')) ?? 40;
+    double escaladaPrecio = double.tryParse(_escaladaPrecioController.text.replaceAll(',', '.')) ?? 0.0;
     int anoReemplazo = int.tryParse(_anoReemplazoController.text) ?? 12;
     double costeReemplazo = double.tryParse(_costeReemplazoController.text.replaceAll(',', '.')) ?? 100000;
 
@@ -299,7 +303,7 @@ class _DashboardAuditoriaScreenState extends State<DashboardAuditoriaScreen> {
     }
 
     // 3. FINANZAS Y VIDA ÚTIL
-    double opexTotalY1 = (opexFijo * 12) + (opexVar * totalGenY1);
+    double opexTotalY1 = opexFijo + (opexVar * totalGenY1);
     double ppaRevAnual = maxBaseload * 24 * 365 * precioPpa;
     double avgMktPrice = totalInyY1 > 0 ? (totalMktRevY1 / totalInyY1) : 0;
     double baseCurtailment = totalInyY1 + totalWastedY1;
@@ -316,18 +320,21 @@ class _DashboardAuditoriaScreenState extends State<DashboardAuditoriaScreen> {
 
     for (int y = 1; y <= vidaUtil; y++) {
       double degMult = pow(1 - (deg / 100), y - 1).toDouble();
+      // Escalada anual del precio de la energía en el mercado (el PPA queda fijo: es un precio pactado)
+      double escalMult = pow(1 + (escaladaPrecio / 100), y - 1).toDouble();
       double genY = totalGenY1 * degMult;
       double lostGen = totalGenY1 - genY;
       totalGenLife += genY;
 
       double curtY = max(0, baseCurtailment - lostGen);
       double inyY = min(curtY, totalInyY1);
-      double mktRevY = inyY * avgMktPrice;
-      double opexY = (opexFijo * 12) + (opexVar * genY);
-      
-      acuIngresosPpa += ppaRevAnual; acuIngresosMkt += mktRevY; acuCosteRed += totalGridCostY1; acuOpex += opexY;
+      double mktRevY = inyY * avgMktPrice * escalMult;
+      double gridCostY = totalGridCostY1 * escalMult;
+      double opexY = opexFijo + (opexVar * genY);
 
-      double cf = ppaRevAnual + mktRevY - totalGridCostY1 - opexY;
+      acuIngresosPpa += ppaRevAnual; acuIngresosMkt += mktRevY; acuCosteRed += gridCostY; acuOpex += opexY;
+
+      double cf = ppaRevAnual + mktRevY - gridCostY - opexY;
       if (y == anoReemplazo) {
         double rep = (bateriaInst * costeReemplazo);
         cf -= rep;
@@ -357,7 +364,9 @@ class _DashboardAuditoriaScreenState extends State<DashboardAuditoriaScreen> {
 
       ingresosPpaY1 = formatoEuro(ppaRevAnual);
       ingresosMktY1 = formatoEuro(totalMktRevY1);
-      costeRedY1 = formatoEuro(totalGridCostY1);
+      // Negamos aquí: si hay muchas horas de precio negativo, comprar en el mercado
+      // puede salir gratis o incluso generar ingreso, y el signo debe reflejarlo.
+      costeRedY1 = formatoEuro(-totalGridCostY1);
       opexY1 = formatoEuro(opexTotalY1);
       totalGastosY1 = formatoEuro(totalGridCostY1 + opexTotalY1);
       capexTotalStr = formatoEuro(capexTotal);
@@ -365,10 +374,11 @@ class _DashboardAuditoriaScreenState extends State<DashboardAuditoriaScreen> {
 
       ingresosPpaLife = formatoEuro(acuIngresosPpa);
       ingresosMktLife = formatoEuro(acuIngresosMkt);
-      costeRedLife = formatoEuro(acuCosteRed);
+      costeRedLife = formatoEuro(-acuCosteRed);
       opexLife = formatoEuro(acuOpex);
       reemplazoLife = formatoEuro(acuReemplazo);
-      beneficioNetoLife = formatoEuro(cumulative + capexTotal); 
+      beneficioNetoLife = formatoEuro(cumulative + capexTotal);
+      beneficioNetoTotalLife = formatoEuro(cumulative); // Beneficio de operación menos el CAPEX inicial
       roiSpots = spots;
     });
   }
@@ -596,7 +606,15 @@ class _DashboardAuditoriaScreenState extends State<DashboardAuditoriaScreen> {
             Row(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                Text(titulo, style: const TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.bold, letterSpacing: 1.0)),
+                Flexible(
+                  child: Text(
+                    titulo,
+                    textAlign: TextAlign.center,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.bold, letterSpacing: 1.0),
+                  ),
+                ),
                 if (onTapIcon != null) ...[
                   const SizedBox(width: 6),
                   InkWell(onTap: onTapIcon, child: const Icon(Icons.info_outline, color: Colors.white, size: 18)),
@@ -723,9 +741,10 @@ class _DashboardAuditoriaScreenState extends State<DashboardAuditoriaScreen> {
                     _buildInputField('OPEX Fijo', _opexFijoController, '€/año', isDark), 
                     _buildInputField('OPEX Variable', _opexVariableController, '€/MWh', isDark),
                     _buildInputField('Precio Acuerdo PPA', _precioPpaController, '€/MWh', isDark),
+                    _buildInputField('Escalada Precio Mercado', _escaladaPrecioController, '%/año', isDark),
                   ], isDark),
                   const SizedBox(height: 16),
-                  
+
                   _buildSeccionHeader('Reemplazo BESS', Icons.battery_charging_full, Colors.purple, isDark),
                   _buildInputCard([
                     _buildInputField('Año de Reemplazo', _anoReemplazoController, 'Años', isDark),
@@ -800,7 +819,7 @@ class _DashboardAuditoriaScreenState extends State<DashboardAuditoriaScreen> {
                                 Divider(color: isDark ? Colors.white24 : Colors.black12),
                                 _buildFilaFinanzas('Ingresos PPA', '$ingresosPpaY1 €', isDark, colorClaro: Colors.green),
                                 _buildFilaFinanzas('Ingresos Mercado', '$ingresosMktY1 €', isDark, colorClaro: Colors.green),
-                                _buildFilaFinanzas('Coste Red (Mercado)', '-$costeRedY1 €', isDark, colorClaro: Colors.red),
+                                _buildFilaFinanzas('Coste Red (Mercado)', '$costeRedY1 €', isDark, colorClaro: costeRedY1.startsWith('-') ? Colors.red : Colors.green),
                                 _buildFilaFinanzas('OPEX Anual', '-$opexY1 €', isDark, colorClaro: Colors.red),
                                 Divider(color: isDark ? Colors.white24 : Colors.black12, thickness: 1),
                                 _buildFilaFinanzas('Flujo de Caja Neto', '$flujoCajaY1 €', isDark, colorClaro: Colors.blueGrey, isBold: true),
@@ -826,11 +845,20 @@ class _DashboardAuditoriaScreenState extends State<DashboardAuditoriaScreen> {
                                 Divider(color: isDark ? Colors.white24 : Colors.black12),
                                 _buildFilaFinanzas('Total Ingresos PPA', '$ingresosPpaLife €', isDark, colorClaro: Colors.green),
                                 _buildFilaFinanzas('Total Mercado', '$ingresosMktLife €', isDark, colorClaro: Colors.green),
-                                _buildFilaFinanzas('Total Coste Red', '-$costeRedLife €', isDark, colorClaro: Colors.red),
+                                _buildFilaFinanzas('Total Coste Red', '$costeRedLife €', isDark, colorClaro: costeRedLife.startsWith('-') ? Colors.red : Colors.green),
                                 _buildFilaFinanzas('Total OPEX', '-$opexLife €', isDark, colorClaro: Colors.red),
                                 _buildFilaFinanzas('Coste Reemplazo BESS', '-$reemplazoLife €', isDark, colorClaro: Colors.red),
-                                Divider(color: isDark ? Colors.white24 : Colors.black12, thickness: 1),
+                                Divider(color: isDark ? Colors.white24 : Colors.black12),
                                 _buildFilaFinanzas('Beneficio de Operación', '$beneficioNetoLife €', isDark, colorClaro: Colors.blueGrey, isBold: true),
+                                _buildFilaFinanzas('CAPEX Inicial Total', '-$capexTotalStr €', isDark, colorClaro: Colors.redAccent),
+                                Divider(color: isDark ? Colors.white24 : Colors.black12, thickness: 1),
+                                _buildFilaFinanzas(
+                                  'Beneficio Neto Total',
+                                  '$beneficioNetoTotalLife €',
+                                  isDark,
+                                  colorClaro: beneficioNetoTotalLife.startsWith('-') ? Colors.redAccent : Colors.green,
+                                  isBold: true,
+                                ),
                               ],
                             ),
                           ),

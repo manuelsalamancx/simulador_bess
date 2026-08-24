@@ -1,4 +1,7 @@
+import 'dart:async';
 import 'dart:convert';
+// ignore: avoid_web_libraries_in_flutter
+import 'dart:html' as html;
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:http/http.dart' as http;
@@ -15,12 +18,34 @@ class _BaseDatosScreenState extends State<BaseDatosScreen> {
   final TextEditingController _latController = TextEditingController(text: '36.72');
   final TextEditingController _lonController = TextEditingController(text: '-4.42');
   final TextEditingController _tokenEsiosController = TextEditingController();
+  final TextEditingController _municipioController = TextEditingController();
+
+  static const List<String> _provincias = [
+    'Álava', 'Albacete', 'Alicante', 'Almería', 'Ávila', 'Badajoz', 'Baleares', 'Barcelona',
+    'Burgos', 'Cáceres', 'Cádiz', 'Cantabria', 'Castellón', 'Ciudad Real', 'Córdoba', 'A Coruña',
+    'Cuenca', 'Girona', 'Granada', 'Guadalajara', 'Gipuzkoa', 'Huelva', 'Huesca', 'Jaén', 'León',
+    'Lleida', 'La Rioja', 'Lugo', 'Madrid', 'Málaga', 'Murcia', 'Navarra', 'Ourense', 'Asturias',
+    'Palencia', 'Las Palmas', 'Pontevedra', 'Salamanca', 'Santa Cruz de Tenerife', 'Segovia',
+    'Sevilla', 'Soria', 'Tarragona', 'Teruel', 'Toledo', 'Valencia', 'Valladolid', 'Bizkaia',
+    'Zamora', 'Zaragoza', 'Ceuta', 'Melilla',
+  ];
+
+  String? _provinciaSeleccionada;
+  bool _buscandoMunicipio = false;
 
   bool _cargandoPVGIS = false;
   bool _cargandoPrecios = false;
-  
+
   List<double> _radiacion8760 = [];
   List<double> _precios8760 = [];
+
+  int _anioSeleccionado = DateTime.now().year - 1;
+  String _indicadorSeleccionado = '600';
+
+  final Map<String, String> _mercadosDisponibles = const {
+    '600': 'Precio Mercado Diario (OMIE)',
+    '1001': 'PVPC (Tarifa Regulada)',
+  };
 
   final Color accentMagenta = const Color(0xFFD80073);
   final Color accentBlue = const Color(0xFF0050EF);
@@ -35,6 +60,7 @@ class _BaseDatosScreenState extends State<BaseDatosScreen> {
     final prefs = await SharedPreferences.getInstance();
     List<String>? radGuardada = prefs.getStringList('radiacion_8760_calc');
     List<String>? preGuardados = prefs.getStringList('precios_8760_calc');
+    String? tokenGuardado = prefs.getString('esios_token');
 
     if (radGuardada != null && radGuardada.length == 8760) {
       _radiacion8760 = radGuardada.map((e) => double.parse(e)).toList();
@@ -42,7 +68,71 @@ class _BaseDatosScreenState extends State<BaseDatosScreen> {
     if (preGuardados != null && preGuardados.length == 8760) {
       _precios8760 = preGuardados.map((e) => double.parse(e)).toList();
     }
+    if (tokenGuardado != null && tokenGuardado.isNotEmpty) {
+      _tokenEsiosController.text = tokenGuardado;
+    }
+
+    String? provinciaGuardada = prefs.getString('ubicacion_provincia_calc');
+    String? municipioGuardado = prefs.getString('ubicacion_municipio_calc');
+    String? latGuardada = prefs.getString('ubicacion_lat_calc');
+    String? lonGuardada = prefs.getString('ubicacion_lon_calc');
+    if (provinciaGuardada != null && _provincias.contains(provinciaGuardada)) {
+      _provinciaSeleccionada = provinciaGuardada;
+    }
+    if (municipioGuardado != null) _municipioController.text = municipioGuardado;
+    if (latGuardada != null) _latController.text = latGuardada;
+    if (lonGuardada != null) _lonController.text = lonGuardada;
+
     setState(() {});
+  }
+
+  Future<void> _guardarUbicacion() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (_provinciaSeleccionada != null) {
+      await prefs.setString('ubicacion_provincia_calc', _provinciaSeleccionada!);
+    }
+    await prefs.setString('ubicacion_municipio_calc', _municipioController.text.trim());
+    await prefs.setString('ubicacion_lat_calc', _latController.text.trim());
+    await prefs.setString('ubicacion_lon_calc', _lonController.text.trim());
+  }
+
+  Future<void> _buscarMunicipio() async {
+    if (_provinciaSeleccionada == null || _municipioController.text.trim().isEmpty) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Selecciona una provincia y escribe un municipio'), backgroundColor: Colors.red));
+      return;
+    }
+
+    setState(() => _buscandoMunicipio = true);
+    try {
+      final url = Uri.https('nominatim.openstreetmap.org', '/search', {
+        'format': 'json',
+        'limit': '1',
+        'countrycodes': 'es',
+        'q': '${_municipioController.text.trim()}, $_provinciaSeleccionada, España',
+      });
+
+      final response = await http.get(url, headers: {'Accept-Language': 'es'});
+      if (response.statusCode == 200) {
+        final results = json.decode(response.body) as List;
+        if (results.isNotEmpty) {
+          final lat = double.parse(results[0]['lat']);
+          final lon = double.parse(results[0]['lon']);
+          setState(() {
+            _latController.text = lat.toStringAsFixed(4);
+            _lonController.text = lon.toStringAsFixed(4);
+          });
+          await _guardarUbicacion();
+          if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('📍 ${results[0]['display_name']}'), backgroundColor: Colors.blue));
+        } else {
+          throw Exception('No se encontró ese municipio');
+        }
+      } else {
+        throw Exception('Error consultando la ubicación');
+      }
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e'), backgroundColor: Colors.red));
+    }
+    setState(() => _buscandoMunicipio = false);
   }
 
   Future<void> _descargarPVGIS() async {
@@ -54,8 +144,8 @@ class _BaseDatosScreenState extends State<BaseDatosScreen> {
       // Construimos la URL objetivo de PVGIS
 String targetUrl = 'https://re.jrc.ec.europa.eu/api/v5_2/seriescalc?lat=$lat&lon=$lon&startyear=2020&endyear=2020&pvcalculation=1&peakpower=1&loss=0&outputformat=json';
 
-// Usamos corsproxy.io, que es mucho más estable para APIs gubernamentales
-final url = Uri.parse('https://corsproxy.io/?' + Uri.encodeComponent(targetUrl));
+// Usamos proxy.cors.sh (corsproxy.io dejó de permitir uso anónimo)
+final url = Uri.parse('https://proxy.cors.sh/$targetUrl');
       
       final response = await http.get(url);
       if (response.statusCode == 200) {
@@ -73,7 +163,8 @@ final url = Uri.parse('https://corsproxy.io/?' + Uri.encodeComponent(targetUrl))
           _radiacion8760 = radTemp.sublist(0, 8760);
           final prefs = await SharedPreferences.getInstance();
           await prefs.setStringList('radiacion_8760_calc', _radiacion8760.map((e) => e.toString()).toList());
-          
+          await _guardarUbicacion();
+
           if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('¡Datos PVGIS (8760h) descargados con éxito!'), backgroundColor: Colors.green));
         }
       } else {
@@ -94,24 +185,54 @@ Future<void> _descargarESIOS() async {
     setState(() => _cargandoPrecios = true);
 
     try {
-      // Pedimos los precios del PVPC (indicador 1001) para un año histórico completo (ej. 2023)
-      final url = Uri.parse('https://api.esios.ree.es/indicators/1001?start_date=2023-01-01T00:00:00&end_date=2023-12-31T23:59:59');
+      // Pedimos el indicador y año seleccionados por el usuario (mercado diario, PVPC, etc.)
+      final targetUrl = 'https://api.esios.ree.es/indicators/$_indicadorSeleccionado?start_date=$_anioSeleccionado-01-01T00:00:00&end_date=$_anioSeleccionado-12-31T23:59:59';
+      // ESIOS no añade cabeceras CORS a la respuesta real (solo al preflight), así que el navegador
+      // bloquea la petición directa. Usamos el mismo proxy CORS que ya usa PVGIS.
+      final url = Uri.parse('https://proxy.cors.sh/$targetUrl');
 
-      final response = await http.get(
-        url,
-        headers: {
-          'Accept': 'application/json; application/vnd.esios-api-v1+json',
-          'Content-Type': 'application/json',
-          'x-api-key': token, // Aquí inyectamos tu llave personal
-        },
-      );
+      http.Response? response;
+      const maxIntentos = 3;
+      int intento = 1;
+      while (true) {
+        try {
+          response = await http.get(
+            url,
+            headers: {
+              'Accept': 'application/json; application/vnd.esios-api-v1+json',
+              'Content-Type': 'application/json',
+              'x-api-key': token, // Aquí inyectamos tu llave personal
+            },
+          ).timeout(const Duration(seconds: 60));
+        } on TimeoutException {
+          // El proxy CORS o ESIOS tardan en generar el año completo: reintentamos antes de rendirnos
+          if (intento >= maxIntentos) {
+            throw Exception('El servidor tardó demasiado en responder (probando $maxIntentos veces). Prueba de nuevo en un rato, o cambia de año/mercado');
+          }
+          intento++;
+          await Future.delayed(const Duration(seconds: 2));
+          continue;
+        }
 
-      if (response.statusCode == 200) {
-        final data = json.decode(response.body);
+        // 502/503/504 son fallos temporales del proxy CORS o de ESIOS (no del token): reintentamos
+        final esFalloTemporal = response.statusCode == 502 || response.statusCode == 503 || response.statusCode == 504;
+        if (!esFalloTemporal || intento >= maxIntentos) break;
+        intento++;
+        await Future.delayed(const Duration(seconds: 2));
+      }
+      final resp = response;
+
+      if (resp.statusCode == 200) {
+        final data = json.decode(resp.body);
         final values = data['indicator']['values'] as List;
 
+        // Algunos indicadores (ej. mercado diario) devuelven varias zonas geográficas (España/Portugal).
+        // Nos quedamos solo con España para no duplicar/desordenar las 8760 horas.
+        final valoresEspana = values.where((v) => (v['geo_name'] ?? '') == 'España').toList();
+        final valoresFiltrados = valoresEspana.isNotEmpty ? valoresEspana : values;
+
         List<double> preciosTemp = [];
-        for (var item in values) {
+        for (var item in valoresFiltrados) {
           // Extraemos el valor del precio que viene en €/MWh
           preciosTemp.add((item['value'] ?? 0.0).toDouble());
         }
@@ -130,10 +251,17 @@ Future<void> _descargarESIOS() async {
         // Diferenciador para guardar en Calculadora o en Auditoría
         String claveMemoria = toString().contains('Auditoria') ? 'precios_8760_aud' : 'precios_8760_calc';
         await prefs.setStringList(claveMemoria, _precios8760.map((e) => e.toString()).toList());
+        // Guardamos el token localmente para no tener que volver a pegarlo cada vez
+        await prefs.setString('esios_token', token);
 
-        if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('¡Precios ESIOS descargados con éxito!'), backgroundColor: Colors.green));
+        final nombreMercado = _mercadosDisponibles[_indicadorSeleccionado] ?? _indicadorSeleccionado;
+        if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('¡$nombreMercado $_anioSeleccionado descargado con éxito!'), backgroundColor: Colors.green));
+      } else if (resp.statusCode == 401 || resp.statusCode == 403) {
+        throw Exception('Código ${resp.statusCode}: Token de ESIOS inválido o sin permisos');
+      } else if (resp.statusCode == 502 || resp.statusCode == 503 || resp.statusCode == 504) {
+        throw Exception('Código ${resp.statusCode}: el proxy CORS o el servidor de ESIOS no respondió a tiempo (fallo temporal, no es tu token). Prueba de nuevo en unos segundos');
       } else {
-        throw Exception('Código ${response.statusCode}: Acceso denegado o Token inválido');
+        throw Exception('Código ${resp.statusCode}: error inesperado al descargar los precios');
       }
     } catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e'), backgroundColor: Colors.red));
@@ -180,6 +308,103 @@ Future<void> _descargarESIOS() async {
     if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Matriz de Precios Patrón 8760h generada'), backgroundColor: Colors.blue));
   }
 
+  // Vía alternativa cuando el proxy CORS falla: cargar un archivo descargado a mano
+  // (JSON crudo de la API de ESIOS, una lista JSON de números, o un CSV de una columna).
+  Future<void> _cargarPreciosDesdeArchivo() async {
+    final input = html.FileUploadInputElement()..accept = '.json,.csv,text/plain,application/json';
+    input.click();
+    await input.onChange.first;
+    if (input.files == null || input.files!.isEmpty) return;
+
+    setState(() => _cargandoPrecios = true);
+    try {
+      final reader = html.FileReader();
+      reader.readAsText(input.files![0]);
+      await reader.onLoad.first;
+      final contenido = (reader.result as String).trim();
+
+      List<double> preciosTemp = [];
+      if (contenido.startsWith('{')) {
+        // Formato crudo de la respuesta de la API de ESIOS
+        final data = json.decode(contenido);
+        final values = data['indicator']['values'] as List;
+        final valoresEspana = values.where((v) => (v['geo_name'] ?? '') == 'España').toList();
+        final valoresFiltrados = valoresEspana.isNotEmpty ? valoresEspana : values;
+        for (var item in valoresFiltrados) {
+          preciosTemp.add((item['value'] ?? 0.0).toDouble());
+        }
+      } else if (contenido.startsWith('[')) {
+        // Lista JSON plana de números
+        final data = json.decode(contenido) as List;
+        preciosTemp = data.map((e) => (e as num).toDouble()).toList();
+      } else {
+        final lineas = contenido.split('\n').where((l) => l.trim().isNotEmpty).toList();
+        if (lineas.isEmpty) throw Exception('El archivo está vacío');
+
+        final cabecera = lineas.first.toLowerCase();
+        if (cabecera.contains('geoname') && cabecera.contains('value')) {
+          // CSV de exportación de ESIOS: mezcla varios países (columnas separadas por ';').
+          // Filtramos por España y cogemos la columna "value" (no la última, que es la fecha).
+          final columnas = lineas.first.split(';').map((c) => c.trim().toLowerCase()).toList();
+          final idxGeoname = columnas.indexOf('geoname');
+          final idxValue = columnas.indexOf('value');
+          for (var linea in lineas.skip(1)) {
+            final partes = linea.split(';');
+            if (partes.length <= idxGeoname || partes.length <= idxValue) continue;
+            if (partes[idxGeoname].trim() != 'España') continue;
+            final valor = double.tryParse(partes[idxValue].trim().replaceAll(',', '.'));
+            if (valor != null) preciosTemp.add(valor);
+          }
+        } else {
+          // CSV simple: una columna de valores, se toma el último campo numérico de cada línea
+          for (var linea in lineas) {
+            final partes = linea.split(RegExp(r'[,;]'));
+            final valor = double.tryParse(partes.last.trim().replaceAll(',', '.'));
+            if (valor != null) preciosTemp.add(valor);
+          }
+        }
+      }
+
+      if (preciosTemp.isEmpty) throw Exception('No se encontraron valores numéricos en el archivo');
+
+      if (preciosTemp.length >= 8760) {
+        _precios8760 = preciosTemp.sublist(0, 8760);
+      } else {
+        _precios8760 = List.from(preciosTemp);
+        while (_precios8760.length < 8760) {
+          _precios8760.add(_precios8760.last);
+        }
+      }
+
+      final prefs = await SharedPreferences.getInstance();
+      String claveMemoria = toString().contains('Auditoria') ? 'precios_8760_aud' : 'precios_8760_calc';
+      await prefs.setStringList(claveMemoria, _precios8760.map((e) => e.toString()).toList());
+
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('✅ Precios cargados desde archivo (${_precios8760.length}h)'), backgroundColor: Colors.green));
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error leyendo el archivo: $e'), backgroundColor: Colors.red));
+    }
+    setState(() => _cargandoPrecios = false);
+  }
+
+  List<double> _preciosMediosPorMes() {
+    const diasMes = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    List<double> medias = [];
+    int inicio = 0;
+    for (int m = 0; m < 12; m++) {
+      int horas = diasMes[m] * 24;
+      int fin = (inicio + horas).clamp(0, _precios8760.length);
+      if (fin <= inicio) {
+        medias.add(0);
+      } else {
+        final segmento = _precios8760.sublist(inicio, fin);
+        medias.add(segmento.reduce((a, b) => a + b) / segmento.length);
+      }
+      inicio += horas;
+    }
+    return medias;
+  }
+
   @override
   Widget build(BuildContext context) {
     bool isDark = Theme.of(context).brightness == Brightness.dark;
@@ -211,7 +436,37 @@ Future<void> _descargarESIOS() async {
                           children: [
                             const Icon(Icons.wb_sunny, color: Colors.orange),
                             const SizedBox(width: 8),
-                            Text('RADIACIÓN SOLAR (PVGIS API)', style: TextStyle(fontWeight: FontWeight.bold, color: isDark ? Colors.white : Colors.black87)),
+                            Expanded(
+                              child: Text('RADIACIÓN SOLAR (PVGIS API)', overflow: TextOverflow.ellipsis, style: TextStyle(fontWeight: FontWeight.bold, color: isDark ? Colors.white : Colors.black87)),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 16),
+                        DropdownButtonFormField<String>(
+                          initialValue: _provinciaSeleccionada,
+                          isExpanded: true,
+                          decoration: const InputDecoration(labelText: 'Provincia', border: OutlineInputBorder(), isDense: true),
+                          items: _provincias.map((p) => DropdownMenuItem(value: p, child: Text(p, overflow: TextOverflow.ellipsis))).toList(),
+                          onChanged: (val) => setState(() => _provinciaSeleccionada = val),
+                        ),
+                        const SizedBox(height: 10),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: TextFormField(
+                                controller: _municipioController,
+                                decoration: const InputDecoration(labelText: 'Municipio', hintText: 'Ej: Marbella', border: OutlineInputBorder(), isDense: true),
+                                onFieldSubmitted: (_) => _buscarMunicipio(),
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                            ElevatedButton(
+                              onPressed: _buscandoMunicipio ? null : _buscarMunicipio,
+                              style: ElevatedButton.styleFrom(backgroundColor: accentBlue, foregroundColor: Colors.white),
+                              child: _buscandoMunicipio
+                                  ? const SizedBox(height: 20, width: 20, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
+                                  : const Icon(Icons.search),
+                            ),
                           ],
                         ),
                         const SizedBox(height: 16),
@@ -255,12 +510,43 @@ Future<void> _descargarESIOS() async {
                           children: [
                             Icon(Icons.euro_symbol, color: accentBlue),
                             const SizedBox(width: 8),
-                            Text('PRECIOS MERCADO (ESIOS/OMIE)', style: TextStyle(fontWeight: FontWeight.bold, color: isDark ? Colors.white : Colors.black87)),
+                            Expanded(
+                              child: Text('PRECIOS MERCADO (ESIOS/OMIE)', overflow: TextOverflow.ellipsis, style: TextStyle(fontWeight: FontWeight.bold, color: isDark ? Colors.white : Colors.black87)),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 16),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: DropdownButtonFormField<int>(
+                                initialValue: _anioSeleccionado,
+                                isExpanded: true,
+                                decoration: const InputDecoration(labelText: 'Año', border: OutlineInputBorder(), isDense: true),
+                                items: List.generate(7, (i) => DateTime.now().year - 1 - i)
+                                    .map((a) => DropdownMenuItem(value: a, child: Text('$a')))
+                                    .toList(),
+                                onChanged: (val) => setState(() => _anioSeleccionado = val!),
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              flex: 2,
+                              child: DropdownButtonFormField<String>(
+                                initialValue: _indicadorSeleccionado,
+                                isExpanded: true,
+                                decoration: const InputDecoration(labelText: 'Mercado', border: OutlineInputBorder(), isDense: true),
+                                items: _mercadosDisponibles.entries
+                                    .map((e) => DropdownMenuItem(value: e.key, child: Text(e.value, overflow: TextOverflow.ellipsis)))
+                                    .toList(),
+                                onChanged: (val) => setState(() => _indicadorSeleccionado = val!),
+                              ),
+                            ),
                           ],
                         ),
                         const SizedBox(height: 16),
                         TextFormField(
-                          controller: _tokenEsiosController, 
+                          controller: _tokenEsiosController,
                           decoration: const InputDecoration(labelText: 'Token ESIOS (Opcional)', hintText: 'Pega tu token de REE aquí', border: OutlineInputBorder(), isDense: true),
                         ),
                         const SizedBox(height: 16),
@@ -282,6 +568,15 @@ Future<void> _descargarESIOS() async {
                               ),
                             ),
                           ],
+                        ),
+                        const SizedBox(height: 10),
+                        SizedBox(
+                          width: double.infinity,
+                          child: OutlinedButton.icon(
+                            onPressed: _cargandoPrecios ? null : _cargarPreciosDesdeArchivo,
+                            icon: const Icon(Icons.upload_file, size: 18),
+                            label: const Text('Cargar precios desde archivo (JSON/CSV)'),
+                          ),
                         ),
                         if (_precios8760.isNotEmpty)
                           Padding(
@@ -309,30 +604,69 @@ Future<void> _descargarESIOS() async {
                 children: [
                   Text('Visualizador de Perfiles 8760h (Primera semana del año)', style: TextStyle(fontWeight: FontWeight.bold, color: isDark ? Colors.white : Colors.blueGrey)),
                   const SizedBox(height: 16),
-                  if (_radiacion8760.isEmpty || _precios8760.isEmpty)
-                    const Expanded(child: Center(child: Text('Descarga ambos bloques de datos para visualizar')))
-                  else
-                    Expanded(
-                      child: LineChart(
-                        LineChartData(
-                          minX: 0, maxX: 168, 
-                          minY: 0, maxY: 250,
-                          lineBarsData: [
-                            LineChartBarData(
-                              spots: List.generate(168, (i) => FlSpot(i.toDouble(), _radiacion8760[i] * 100)), 
-                              isCurved: true, color: Colors.orange, barWidth: 2, dotData: const FlDotData(show: false),
+                  Expanded(
+                    flex: 1,
+                    child: (_radiacion8760.isEmpty || _precios8760.isEmpty)
+                        ? const Center(child: Text('Descarga ambos bloques de datos para visualizar'))
+                        : LineChart(
+                            LineChartData(
+                              minX: 0, maxX: 168,
+                              minY: 0, maxY: 250,
+                              lineBarsData: [
+                                LineChartBarData(
+                                  spots: List.generate(168, (i) => FlSpot(i.toDouble(), _radiacion8760[i] * 100)),
+                                  isCurved: true, color: Colors.orange, barWidth: 2, dotData: const FlDotData(show: false),
+                                ),
+                                LineChartBarData(
+                                  spots: List.generate(168, (i) => FlSpot(i.toDouble(), _precios8760[i])),
+                                  isCurved: true, color: accentBlue, barWidth: 2, dotData: const FlDotData(show: false),
+                                ),
+                              ],
+                              titlesData: const FlTitlesData(rightTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)), topTitles: AxisTitles(sideTitles: SideTitles(showTitles: false))),
+                              gridData: FlGridData(show: true, drawVerticalLine: false, getDrawingHorizontalLine: (val) => FlLine(color: isDark ? Colors.white10 : Colors.black12, strokeWidth: 1)),
+                              borderData: FlBorderData(show: false),
                             ),
-                            LineChartBarData(
-                              spots: List.generate(168, (i) => FlSpot(i.toDouble(), _precios8760[i])),
-                              isCurved: true, color: accentBlue, barWidth: 2, dotData: const FlDotData(show: false),
+                          ),
+                  ),
+                  const SizedBox(height: 24),
+                  Text('Precio medio mensual (€/MWh)', style: TextStyle(fontWeight: FontWeight.bold, color: isDark ? Colors.white : Colors.blueGrey)),
+                  const SizedBox(height: 16),
+                  Expanded(
+                    flex: 1,
+                    child: _precios8760.isEmpty
+                        ? const Center(child: Text('Descarga los precios para visualizar'))
+                        : BarChart(
+                            BarChartData(
+                              minY: 0,
+                              barGroups: _preciosMediosPorMes().asMap().entries.map((e) {
+                                return BarChartGroupData(x: e.key, barRods: [
+                                  BarChartRodData(toY: e.value, color: accentBlue, width: 14, borderRadius: BorderRadius.circular(4)),
+                                ]);
+                              }).toList(),
+                              titlesData: FlTitlesData(
+                                rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                                topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                                leftTitles: AxisTitles(sideTitles: SideTitles(showTitles: true, reservedSize: 40, getTitlesWidget: (value, meta) => Text(value.toInt().toString(), style: TextStyle(fontSize: 10, color: isDark ? Colors.grey : Colors.black54)))),
+                                bottomTitles: AxisTitles(
+                                  sideTitles: SideTitles(
+                                    showTitles: true,
+                                    getTitlesWidget: (value, meta) {
+                                      const mesesAbrev = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
+                                      final i = value.toInt();
+                                      if (i < 0 || i > 11) return const SizedBox.shrink();
+                                      return Padding(
+                                        padding: const EdgeInsets.only(top: 4),
+                                        child: Text(mesesAbrev[i], style: TextStyle(fontSize: 10, color: isDark ? Colors.grey : Colors.black54)),
+                                      );
+                                    },
+                                  ),
+                                ),
+                              ),
+                              gridData: FlGridData(show: true, drawVerticalLine: false, getDrawingHorizontalLine: (val) => FlLine(color: isDark ? Colors.white10 : Colors.black12, strokeWidth: 1)),
+                              borderData: FlBorderData(show: false),
                             ),
-                          ],
-                          titlesData: const FlTitlesData(rightTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)), topTitles: AxisTitles(sideTitles: SideTitles(showTitles: false))),
-                          gridData: FlGridData(show: true, drawVerticalLine: false, getDrawingHorizontalLine: (val) => FlLine(color: isDark ? Colors.white10 : Colors.black12, strokeWidth: 1)),
-                          borderData: FlBorderData(show: false),
-                        ),
-                      ),
-                    ),
+                          ),
+                  ),
                 ],
               ),
             ),

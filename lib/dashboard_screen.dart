@@ -21,6 +21,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   final TextEditingController _opexFijoController = TextEditingController();
   final TextEditingController _opexVariableController = TextEditingController();
   final TextEditingController _precioPpaController = TextEditingController();
+  final TextEditingController _escaladaPrecioController = TextEditingController();
   final TextEditingController _anoReemplazoController = TextEditingController();
   final TextEditingController _costeReemplazoController = TextEditingController();
 
@@ -38,7 +39,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   String ingresosPpaY1 = '0,00', ingresosMktY1 = '0,00', costeRedY1 = '0,00', opexY1 = '0,00';
   String capexTotalStr = '0,00', totalGastosY1 = '0,00', flujoCajaY1 = '0,00';
   String ingresosPpaLife = '0,00', ingresosMktLife = '0,00', costeRedLife = '0,00';
-  String opexLife = '0,00', reemplazoLife = '0,00', beneficioNetoLife = '0,00';
+  String opexLife = '0,00', reemplazoLife = '0,00', beneficioNetoLife = '0,00', beneficioNetoTotalLife = '0,00';
 
   List<FlSpot> roiSpots = [];
   double minRoiY = 0;
@@ -118,6 +119,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       _opexFijoController.text = prefs.getString('opex_fijo') ?? '1500';
       _opexVariableController.text = prefs.getString('opex_var') ?? '5';
       _precioPpaController.text = prefs.getString('precio_ppa') ?? '40';
+      _escaladaPrecioController.text = prefs.getString('escalada_precio') ?? '2';
       _anoReemplazoController.text = prefs.getString('ano_reemplazo') ?? '12';
       _costeReemplazoController.text = prefs.getString('coste_reemplazo') ?? '100000';
       _mercadoGlobalActivo = prefs.getBool('mercado_activo') ?? true;
@@ -142,6 +144,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     await prefs.setString('opex_fijo', _opexFijoController.text);
     await prefs.setString('opex_var', _opexVariableController.text);
     await prefs.setString('precio_ppa', _precioPpaController.text);
+    await prefs.setString('escalada_precio', _escaladaPrecioController.text);
     await prefs.setString('ano_reemplazo', _anoReemplazoController.text);
     await prefs.setString('coste_reemplazo', _costeReemplazoController.text);
     await prefs.setBool('mercado_activo', _mercadoGlobalActivo);
@@ -197,6 +200,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     double opexFijo = double.tryParse(_opexFijoController.text.replaceAll(',', '.')) ?? 1500;
     double opexVar = double.tryParse(_opexVariableController.text.replaceAll(',', '.')) ?? 5;
     double precioPpa = double.tryParse(_precioPpaController.text.replaceAll(',', '.')) ?? 40;
+    double escaladaPrecio = double.tryParse(_escaladaPrecioController.text.replaceAll(',', '.')) ?? 0.0;
     int anoReemplazo = int.tryParse(_anoReemplazoController.text) ?? 12;
     double costeReemplazo = double.tryParse(_costeReemplazoController.text.replaceAll(',', '.')) ?? 100000;
 
@@ -332,7 +336,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     }
 
     // 4. FINANZAS Y VIDA ÚTIL
-    double opexTotalY1 = (opexFijo * 12) + (opexVar * totalGenY1);
+    double opexTotalY1 = opexFijo + (opexVar * totalGenY1);
     double ppaRevAnual = maxBaseload * 24 * 365 * precioPpa;
     double capexTotal = (pot * capexFv) + (bateriaNominal * capexBat);
     double avgMktPrice = totalInyY1 > 0 ? (totalMktRevY1 / totalInyY1) : 0;
@@ -349,18 +353,21 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
     for (int y = 1; y <= vidaUtil; y++) {
       double degMult = pow(1 - (deg / 100), y - 1).toDouble();
+      // Escalada anual del precio de la energía en el mercado (el PPA queda fijo: es un precio pactado)
+      double escalMult = pow(1 + (escaladaPrecio / 100), y - 1).toDouble();
       double genY = totalGenY1 * degMult;
       double lostGen = totalGenY1 - genY;
       totalGenLife += genY;
 
       double curtY = max(0, baseCurtailment - lostGen);
       double inyY = min(curtY, totalInyY1);
-      double mktRevY = inyY * avgMktPrice;
-      double opexY = (opexFijo * 12) + (opexVar * genY);
-      
-      acuIngresosPpa += ppaRevAnual; acuIngresosMkt += mktRevY; acuCosteRed += totalGridCostY1; acuOpex += opexY;
+      double mktRevY = inyY * avgMktPrice * escalMult;
+      double gridCostY = totalGridCostY1 * escalMult;
+      double opexY = opexFijo + (opexVar * genY);
 
-      double cf = ppaRevAnual + mktRevY - totalGridCostY1 - opexY;
+      acuIngresosPpa += ppaRevAnual; acuIngresosMkt += mktRevY; acuCosteRed += gridCostY; acuOpex += opexY;
+
+      double cf = ppaRevAnual + mktRevY - gridCostY - opexY;
       if (y == anoReemplazo) {
         double rep = (bateriaNominal * costeReemplazo);
         cf -= rep;
@@ -392,7 +399,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
       ingresosPpaY1 = formatoEuro(ppaRevAnual);
       ingresosMktY1 = formatoEuro(totalMktRevY1);
-      costeRedY1 = formatoEuro(totalGridCostY1);
+      // Negamos aquí: si hay muchas horas de precio negativo, comprar en el mercado
+      // puede salir gratis o incluso generar ingreso, y el signo debe reflejarlo.
+      costeRedY1 = formatoEuro(-totalGridCostY1);
       opexY1 = formatoEuro(opexTotalY1);
       totalGastosY1 = formatoEuro(totalGridCostY1 + opexTotalY1);
       capexTotalStr = formatoEuro(capexTotal);
@@ -400,10 +409,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
       ingresosPpaLife = formatoEuro(acuIngresosPpa);
       ingresosMktLife = formatoEuro(acuIngresosMkt);
-      costeRedLife = formatoEuro(acuCosteRed);
+      costeRedLife = formatoEuro(-acuCosteRed);
       opexLife = formatoEuro(acuOpex);
       reemplazoLife = formatoEuro(acuReemplazo);
-      beneficioNetoLife = formatoEuro(cumulative + capexTotal); 
+      beneficioNetoLife = formatoEuro(cumulative + capexTotal);
+      beneficioNetoTotalLife = formatoEuro(cumulative); // Beneficio de operación menos el CAPEX inicial
       roiSpots = spots;
     });
   }
@@ -465,8 +475,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
               mainAxisSize: MainAxisSize.min,
               children: [
                 Text(
-                  tipo == 'bloque' 
-                    ? 'Motor 8760h: Se evalúan las 8760 horas reales del año frente a la demanda para encontrar el bloque fijo matemático máximo que puede entregar la planta sin agotar la batería en ningún momento.'
+                  tipo == 'bloque'
+                    ? 'Motor 8760h: Se busca el bloque fijo máximo permitiendo que hasta un 10% de las horas del año (unas 876 h) se queden sin batería suficiente; en esas horas la planta compra la energía que falta en el mercado, coste ya incluido en "Coste Red".\n\nEs un objetivo con alta probabilidad de cumplimiento (similar a un P90), no una garantía absoluta hora a hora — no lo uses como compromiso contractual firme sin margen adicional.'
                     : tipo == 'lcoe'
                     ? 'El LCOE (Levelized Cost of Energy) representa el coste medio de generar 1 MWh a lo largo de toda la vida del proyecto.\n\nFórmula:\n(CAPEX Total + OPEX Acumulado + Compras de Red + Reemplazo de Baterías) / Generación Fotovoltaica Total (con degradación).'
                     : tipo == 'tir'
@@ -630,7 +640,15 @@ class _DashboardScreenState extends State<DashboardScreen> {
             Row(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                Text(titulo, style: const TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.bold, letterSpacing: 1.0)),
+                Flexible(
+                  child: Text(
+                    titulo,
+                    textAlign: TextAlign.center,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.bold, letterSpacing: 1.0),
+                  ),
+                ),
                 if (onTapIcon != null) ...[
                   const SizedBox(width: 6),
                   InkWell(onTap: onTapIcon, child: const Icon(Icons.info_outline, color: Colors.white, size: 18)),
@@ -757,6 +775,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     _buildInputField('OPEX Fijo', _opexFijoController, '€/año', isDark), 
                     _buildInputField('OPEX Variable', _opexVariableController, '€/MWh', isDark),
                     _buildInputField('Precio Acuerdo PPA', _precioPpaController, '€/MWh', isDark),
+                    _buildInputField('Escalada Precio Mercado', _escaladaPrecioController, '%/año', isDark),
                   ], isDark),
                   const SizedBox(height: 16),
                   
@@ -803,7 +822,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   // KPIs Row 1
                   Row(
                     children: [
-                      Expanded(child: _buildKPICardSimple('BLOQUE FIJO', bloqueFijoMostrar, 'MW', Colors.orange, isDark, onTapIcon: () => _mostrarExplicacion('bloque', isDark))),
+                      Expanded(child: _buildKPICardSimple('BLOQUE FIJO (OBJETIVO P90)', bloqueFijoMostrar, 'MW', Colors.orange, isDark, onTapIcon: () => _mostrarExplicacion('bloque', isDark))),
                       const SizedBox(width: 12),
                       Expanded(child: _buildKPICardSimple('BATERÍA', bateriaNecesariaMostrar, 'MWh', Colors.purple, isDark, onTapIcon: () => _mostrarExplicacion('bateria', isDark))),
                       const SizedBox(width: 12),
@@ -834,7 +853,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                 Divider(color: isDark ? Colors.white24 : Colors.black12),
                                 _buildFilaFinanzas('Ingresos PPA', '$ingresosPpaY1 €', isDark, colorClaro: Colors.green),
                                 _buildFilaFinanzas('Ingresos Mercado', '$ingresosMktY1 €', isDark, colorClaro: Colors.green),
-                                _buildFilaFinanzas('Coste Red (Mercado)', '-$costeRedY1 €', isDark, colorClaro: Colors.red),
+                                _buildFilaFinanzas('Coste Red (Mercado)', '$costeRedY1 €', isDark, colorClaro: costeRedY1.startsWith('-') ? Colors.red : Colors.green),
                                 _buildFilaFinanzas('OPEX Anual', '-$opexY1 €', isDark, colorClaro: Colors.red),
                                 Divider(color: isDark ? Colors.white24 : Colors.black12, thickness: 1),
                                 _buildFilaFinanzas('Flujo de Caja Neto', '$flujoCajaY1 €', isDark, colorClaro: Colors.blueGrey, isBold: true),
@@ -860,11 +879,20 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                 Divider(color: isDark ? Colors.white24 : Colors.black12),
                                 _buildFilaFinanzas('Total Ingresos PPA', '$ingresosPpaLife €', isDark, colorClaro: Colors.green),
                                 _buildFilaFinanzas('Total Mercado', '$ingresosMktLife €', isDark, colorClaro: Colors.green),
-                                _buildFilaFinanzas('Total Coste Red', '-$costeRedLife €', isDark, colorClaro: Colors.red),
+                                _buildFilaFinanzas('Total Coste Red', '$costeRedLife €', isDark, colorClaro: costeRedLife.startsWith('-') ? Colors.red : Colors.green),
                                 _buildFilaFinanzas('Total OPEX', '-$opexLife €', isDark, colorClaro: Colors.red),
                                 _buildFilaFinanzas('Coste Reemplazo BESS', '-$reemplazoLife €', isDark, colorClaro: Colors.red),
-                                Divider(color: isDark ? Colors.white24 : Colors.black12, thickness: 1),
+                                Divider(color: isDark ? Colors.white24 : Colors.black12),
                                 _buildFilaFinanzas('Beneficio de Operación', '$beneficioNetoLife €', isDark, colorClaro: Colors.blueGrey, isBold: true),
+                                _buildFilaFinanzas('CAPEX Inicial Total', '-$capexTotalStr €', isDark, colorClaro: Colors.redAccent),
+                                Divider(color: isDark ? Colors.white24 : Colors.black12, thickness: 1),
+                                _buildFilaFinanzas(
+                                  'Beneficio Neto Total',
+                                  '$beneficioNetoTotalLife €',
+                                  isDark,
+                                  colorClaro: beneficioNetoTotalLife.startsWith('-') ? Colors.redAccent : Colors.green,
+                                  isBold: true,
+                                ),
                               ],
                             ),
                           ),
