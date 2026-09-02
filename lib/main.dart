@@ -1,15 +1,39 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
-import 'base_datos.dart'; 
-import 'calculos.dart';   
-import 'dashboard_screen.dart'; 
+import 'package:flutter/services.dart' show rootBundle;
+import 'package:shared_preferences/shared_preferences.dart';
+import 'base_datos.dart';
+import 'calculos.dart';
+import 'dashboard_screen.dart';
 import 'base_datos_auditoria.dart';
 import 'calculos_auditoria.dart';
 import 'dashboard_auditoria.dart';
+import 'diseno_optimo_auditoria.dart';
 
 final ValueNotifier<bool> isDarkModeNotifier = ValueNotifier(true);
 
-void main() {
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await _sembrarPreciosPorDefectoAuditoria();
   runApp(const BessSimulatorApp());
+}
+
+// Versión "admin": si nunca se han descargado precios de mercado para Auditoría
+// (primer arranque, o localStorage vacío), se precargan de fábrica con un año real
+// de ESIOS (España, 2025) incluido en el propio paquete, para no depender de la API
+// ni tener que volver a descargarlos cada vez.
+Future<void> _sembrarPreciosPorDefectoAuditoria() async {
+  try {
+    final prefs = await SharedPreferences.getInstance();
+    if (prefs.getStringList('precios_8760_aud') == null) {
+      final jsonStr = await rootBundle.loadString('assets/precios_default_aud.json');
+      final List<dynamic> valores = json.decode(jsonStr);
+      await prefs.setStringList('precios_8760_aud', valores.map((e) => e.toString()).toList());
+    }
+  } catch (_) {
+    // Si el asset no está disponible por algún motivo, simplemente no se precarga nada
+    // y la app sigue funcionando igual que antes (pidiendo la descarga manual).
+  }
 }
 
 class BessSimulatorApp extends StatelessWidget {
@@ -67,9 +91,10 @@ class _MainLayoutState extends State<MainLayout> {
     const BaseDatosAuditoriaScreen(),     // 3
     const CalculosAuditoriaScreen(),      // 4
     const DashboardAuditoriaScreen(),     // 5
+    const DisenoOptimoAuditoriaScreen(),  // 6
 
     // --- SECCIÓN 3: AJUSTES ---
-    const AjustesScreen(),         // 6
+    const AjustesScreen(),         // 7
   ];
 
   void _alSeleccionarMenu(int index) {
@@ -126,9 +151,10 @@ class _MainLayoutState extends State<MainLayout> {
             _buildDrawerItem(Icons.storage, 'Base de Datos', 3, isDark),
             _buildDrawerItem(Icons.calculate, 'Cálculos', 4, isDark),
             _buildDrawerItem(Icons.search_rounded, 'Dashboard Auditoría', 5, isDark),
+            _buildDrawerItem(Icons.auto_fix_high, 'Diseño Óptimo', 6, isDark),
 
             const Divider(),
-            _buildDrawerItem(Icons.settings, 'Ajustes de Sistema', 6, isDark),
+            _buildDrawerItem(Icons.settings, 'Ajustes de Sistema', 7, isDark),
           ],
         ),
       ),
