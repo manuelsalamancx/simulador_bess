@@ -177,13 +177,13 @@ class _DashboardAuditoriaScreenState extends State<DashboardAuditoriaScreen> {
   Future<void> _ejecutarMatematicas8760Aud() async {
     final prefs = await SharedPreferences.getInstance();
     
-    List<String>? radStrs = prefs.getStringList('radiacion_8760_aud');
-    List<String>? preStrs = prefs.getStringList('precios_8760_aud');
+    List<String>? radStrs = prefs.getStringList('radiacion_8760');
+    List<String>? preStrs = prefs.getStringList('precios_8760');
 
     if (radStrs == null || preStrs == null || radStrs.length < 8760 || preStrs.length < 8760) {
       setState(() {
         bloqueFijoMaxMostrar = "Faltan Datos";
-        bateriaInstaladaMostrar = "Ve a Base de Datos";
+        bateriaInstaladaMostrar = "Ve a Inicio";
       });
       return;
     }

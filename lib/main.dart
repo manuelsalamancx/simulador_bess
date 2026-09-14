@@ -2,10 +2,9 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:shared_preferences/shared_preferences.dart';
-import 'base_datos.dart';
+import 'pantalla_inicio.dart';
 import 'calculos.dart';
 import 'dashboard_screen.dart';
-import 'base_datos_auditoria.dart';
 import 'calculos_auditoria.dart';
 import 'dashboard_auditoria.dart';
 import 'diseno_optimo_auditoria.dart';
@@ -14,21 +13,51 @@ final ValueNotifier<bool> isDarkModeNotifier = ValueNotifier(true);
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await _sembrarPreciosPorDefectoAuditoria();
+  await _migrarDatosAntiguos();
+  await _sembrarPreciosPorDefecto();
   runApp(const BessSimulatorApp());
 }
 
-// Versión "admin": si nunca se han descargado precios de mercado para Auditoría
-// (primer arranque, o localStorage vacío), se precargan de fábrica con un año real
-// de ESIOS (España, 2025) incluido en el propio paquete, para no depender de la API
-// ni tener que volver a descargarlos cada vez.
-Future<void> _sembrarPreciosPorDefectoAuditoria() async {
+// Radiación/precios eran independientes por módulo (sufijos _calc/_aud); ahora
+// se comparten. Si ya había datos guardados con el esquema antiguo y todavía no
+// existe la clave compartida, los migramos una vez para no perder ese trabajo.
+Future<void> _migrarDatosAntiguos() async {
   try {
     final prefs = await SharedPreferences.getInstance();
-    if (prefs.getStringList('precios_8760_aud') == null) {
+    if (prefs.getStringList('radiacion_8760') == null) {
+      final antigua = prefs.getStringList('radiacion_8760_aud') ?? prefs.getStringList('radiacion_8760_calc');
+      if (antigua != null) await prefs.setStringList('radiacion_8760', antigua);
+    }
+    if (prefs.getStringList('precios_8760') == null) {
+      final antigua = prefs.getStringList('precios_8760_aud') ?? prefs.getStringList('precios_8760_calc');
+      if (antigua != null) await prefs.setStringList('precios_8760', antigua);
+    }
+    if (prefs.getString('ubicacion_provincia') == null) {
+      final antigua = prefs.getString('ubicacion_provincia_aud') ?? prefs.getString('ubicacion_provincia_calc');
+      if (antigua != null) {
+        await prefs.setString('ubicacion_provincia', antigua);
+        await prefs.setString('ubicacion_municipio', prefs.getString('ubicacion_municipio_aud') ?? prefs.getString('ubicacion_municipio_calc') ?? '');
+        await prefs.setString('ubicacion_lat', prefs.getString('ubicacion_lat_aud') ?? prefs.getString('ubicacion_lat_calc') ?? '');
+        await prefs.setString('ubicacion_lon', prefs.getString('ubicacion_lon_aud') ?? prefs.getString('ubicacion_lon_calc') ?? '');
+      }
+    }
+  } catch (_) {
+    // Sin datos antiguos que migrar, o error leyendo localStorage: no pasa nada,
+    // simplemente se pedirán los datos de nuevo desde Inicio.
+  }
+}
+
+// Versión "admin": si nunca se han descargado precios de mercado (primer
+// arranque, o localStorage vacío), se precargan de fábrica con un año real
+// de ESIOS (España, 2025) incluido en el propio paquete, para no depender de la API
+// ni tener que volver a descargarlos cada vez. Comparten dato Dimensionamiento y Auditoría.
+Future<void> _sembrarPreciosPorDefecto() async {
+  try {
+    final prefs = await SharedPreferences.getInstance();
+    if (prefs.getStringList('precios_8760') == null) {
       final jsonStr = await rootBundle.loadString('assets/precios_default_aud.json');
       final List<dynamic> valores = json.decode(jsonStr);
-      await prefs.setStringList('precios_8760_aud', valores.map((e) => e.toString()).toList());
+      await prefs.setStringList('precios_8760', valores.map((e) => e.toString()).toList());
     }
   } catch (_) {
     // Si el asset no está disponible por algún motivo, simplemente no se precarga nada
@@ -79,29 +108,36 @@ class MainLayout extends StatefulWidget {
 }
 
 class _MainLayoutState extends State<MainLayout> {
-  int _indiceSeleccionado = 2; // Arranca en Dashboard (Bloque Fijo)
+  int _indiceSeleccionado = 0; // Arranca en la pantalla de Inicio
 
-  final List<Widget> _ventanas = [
+  late final List<Widget> _ventanas = [
+    PantallaInicioScreen(onSeleccionarEscenario: _irA), // 0
+
     // --- SECCIÓN 1: DIMENSIONAMIENTO ---
-    const BaseDatosScreen(),       // 0
     const CalculosScreen(),        // 1
     const DashboardScreen(),       // 2
-    
+
     // --- SECCIÓN 2: AUDITORÍA INVERSA ---
-    const BaseDatosAuditoriaScreen(),     // 3
-    const CalculosAuditoriaScreen(),      // 4
-    const DashboardAuditoriaScreen(),     // 5
-    const DisenoOptimoAuditoriaScreen(),  // 6
+    const CalculosAuditoriaScreen(),      // 3
+    const DashboardAuditoriaScreen(),     // 4
+    const DisenoOptimoAuditoriaScreen(),  // 5
 
     // --- SECCIÓN 3: AJUSTES ---
-    const AjustesScreen(),         // 7
+    const AjustesScreen(),         // 6
   ];
+
+  // Usado desde la Pantalla de Inicio (no está dentro del Drawer, así que no cierra nada)
+  void _irA(int index) {
+    setState(() {
+      _indiceSeleccionado = index;
+    });
+  }
 
   void _alSeleccionarMenu(int index) {
     setState(() {
       _indiceSeleccionado = index;
     });
-    Navigator.pop(context); 
+    Navigator.pop(context);
   }
 
   @override
@@ -141,20 +177,21 @@ class _MainLayoutState extends State<MainLayout> {
               child: const Text('Menú de Navegación', style: TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.bold)),
             ),
             
-            Padding(padding: const EdgeInsets.only(left: 16, top: 16, bottom: 8), child: Text('DIMENSIONAMIENTO', style: TextStyle(color: isDark ? Colors.grey : Colors.blueGrey, fontSize: 12, fontWeight: FontWeight.bold))),
-            _buildDrawerItem(Icons.storage, 'Base de Datos', 0, isDark),
-            _buildDrawerItem(Icons.calculate, 'Cálculos', 1, isDark),
-            _buildDrawerItem(Icons.dashboard, 'Dashboard Gráfico', 2, isDark),
-            
-            const Divider(),
-            Padding(padding: const EdgeInsets.only(left: 16, top: 8, bottom: 8), child: Text('AUDITORÍA', style: TextStyle(color: isDark ? Colors.grey : Colors.blueGrey, fontSize: 12, fontWeight: FontWeight.bold))),
-            _buildDrawerItem(Icons.storage, 'Base de Datos', 3, isDark),
-            _buildDrawerItem(Icons.calculate, 'Cálculos', 4, isDark),
-            _buildDrawerItem(Icons.search_rounded, 'Dashboard Auditoría', 5, isDark),
-            _buildDrawerItem(Icons.auto_fix_high, 'Diseño Óptimo', 6, isDark),
+            _buildDrawerItem(Icons.home, 'Inicio', 0, isDark),
 
             const Divider(),
-            _buildDrawerItem(Icons.settings, 'Ajustes de Sistema', 7, isDark),
+            Padding(padding: const EdgeInsets.only(left: 16, top: 8, bottom: 8), child: Text('DIMENSIONAMIENTO', style: TextStyle(color: isDark ? Colors.grey : Colors.blueGrey, fontSize: 12, fontWeight: FontWeight.bold))),
+            _buildDrawerItem(Icons.calculate, 'Cálculos', 1, isDark),
+            _buildDrawerItem(Icons.dashboard, 'Dashboard Gráfico', 2, isDark),
+
+            const Divider(),
+            Padding(padding: const EdgeInsets.only(left: 16, top: 8, bottom: 8), child: Text('AUDITORÍA', style: TextStyle(color: isDark ? Colors.grey : Colors.blueGrey, fontSize: 12, fontWeight: FontWeight.bold))),
+            _buildDrawerItem(Icons.calculate, 'Cálculos', 3, isDark),
+            _buildDrawerItem(Icons.search_rounded, 'Dashboard Auditoría', 4, isDark),
+            _buildDrawerItem(Icons.auto_fix_high, 'Diseño Óptimo', 5, isDark),
+
+            const Divider(),
+            _buildDrawerItem(Icons.settings, 'Ajustes de Sistema', 6, isDark),
           ],
         ),
       ),

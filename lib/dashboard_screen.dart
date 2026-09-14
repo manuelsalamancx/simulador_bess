@@ -175,13 +175,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
   Future<void> _ejecutarMatematicas8760() async {
     final prefs = await SharedPreferences.getInstance();
     
-    List<String>? radStrs = prefs.getStringList('radiacion_8760_calc');
-    List<String>? preStrs = prefs.getStringList('precios_8760_calc');
+    List<String>? radStrs = prefs.getStringList('radiacion_8760');
+    List<String>? preStrs = prefs.getStringList('precios_8760');
 
     if (radStrs == null || preStrs == null || radStrs.length < 8760 || preStrs.length < 8760) {
       setState(() {
         bloqueFijoMostrar = "Faltan Datos";
-        bateriaNecesariaMostrar = "Ve a Base de Datos";
+        bateriaNecesariaMostrar = "Ve a Inicio";
       });
       return;
     }

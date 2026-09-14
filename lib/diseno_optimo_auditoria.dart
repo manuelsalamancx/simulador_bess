@@ -30,6 +30,20 @@ class _DisenoOptimoAuditoriaScreenState extends State<DisenoOptimoAuditoriaScree
   final TextEditingController _anoReemplazoController = TextEditingController();
   final TextEditingController _costeReemplazoController = TextEditingController();
 
+  // Modos "Solo FV" / "Solo Batería": aquí la FV y/o la batería son datos
+  // directos (no se buscan), y en vez de un precio PPA fijo se resuelve el
+  // LCOE (precio) que hace que la TIR del proyecto sea exactamente 5% o 10%.
+  String _modo = 'optimizar'; // 'optimizar' | 'solo_fv' | 'solo_bateria'
+  final TextEditingController _fvDirectaController = TextEditingController();
+  final TextEditingController _costeFvKwController = TextEditingController();
+  final TextEditingController _bateriaPotDirectaController = TextEditingController();
+  final TextEditingController _bateriaMwhDirectaController = TextEditingController();
+  final TextEditingController _costeBatValorController = TextEditingController();
+  String _costeBatUnidad = 'kW'; // 'kW' | 'MW'
+  String _tasaDetalle = '10'; // '5' | '10' | 'manual': qué precio se usa para el detalle mostrado
+
+  String get _etiquetaDetalle => _tasaDetalle == '5' ? '5% TIR' : (_tasaDetalle == '10' ? '10% TIR' : 'PPA manual');
+
   Map<String, String> hInicioMes = {};
   Map<String, String> hFinMes = {};
   String _mesHorasSeleccionado = 'Enero';
@@ -50,6 +64,7 @@ class _DisenoOptimoAuditoriaScreenState extends State<DisenoOptimoAuditoriaScree
 
   String ingresosPpaLife = '0,00', ingresosMktLife = '0,00', costeRedLife = '0,00', opexLife = '0,00';
   String reemplazoLife = '0,00', beneficioNetoLife = '0,00', beneficioNetoTotalLife = '0,00';
+  String lcoe5Mostrar = '0,00', lcoe10Mostrar = '0,00';
 
   List<FlSpot> roiSpots = [];
   double minRoiY = 0;
@@ -131,6 +146,15 @@ class _DisenoOptimoAuditoriaScreenState extends State<DisenoOptimoAuditoriaScree
       _costeReemplazoController.text = prefs.getString('coste_reemplazo_opt') ?? '100000';
       _mercadoGlobalActivo = prefs.getBool('mercado_activo_opt') ?? true;
 
+      _modo = prefs.getString('modo_opt') ?? 'optimizar';
+      _fvDirectaController.text = prefs.getString('fv_directa_opt') ?? '10';
+      _costeFvKwController.text = prefs.getString('coste_fv_kw_opt') ?? '450';
+      _bateriaPotDirectaController.text = prefs.getString('bateria_pot_directa_opt') ?? '2';
+      _bateriaMwhDirectaController.text = prefs.getString('bateria_mwh_directa_opt') ?? '8';
+      _costeBatValorController.text = prefs.getString('coste_bat_valor_opt') ?? '150';
+      _costeBatUnidad = prefs.getString('coste_bat_unidad_opt') ?? 'kW';
+      _tasaDetalle = prefs.getString('tasa_detalle_opt') ?? '10';
+
       for (String m in mesesNombres) {
         hInicioMes[m] = prefs.getString('h_inicio_opt_$m') ?? '1';
         hFinMes[m] = prefs.getString('h_fin_opt_$m') ?? '4';
@@ -155,16 +179,31 @@ class _DisenoOptimoAuditoriaScreenState extends State<DisenoOptimoAuditoriaScree
     await prefs.setString('ano_reemplazo_opt', _anoReemplazoController.text);
     await prefs.setString('coste_reemplazo_opt', _costeReemplazoController.text);
     await prefs.setBool('mercado_activo_opt', _mercadoGlobalActivo);
-    await prefs.setString('h_inicio_opt_$_mesHorasSeleccionado', hInicioMes[_mesHorasSeleccionado]!);
-    await prefs.setString('h_fin_opt_$_mesHorasSeleccionado', hFinMes[_mesHorasSeleccionado]!);
+    await prefs.setString('h_inicio_opt_$_mesHorasSeleccionado', hInicioMes[_mesHorasSeleccionado] ?? '1');
+    await prefs.setString('h_fin_opt_$_mesHorasSeleccionado', hFinMes[_mesHorasSeleccionado] ?? '4');
 
-    await _optimizarDiseno();
+    await prefs.setString('modo_opt', _modo);
+    await prefs.setString('fv_directa_opt', _fvDirectaController.text);
+    await prefs.setString('coste_fv_kw_opt', _costeFvKwController.text);
+    await prefs.setString('bateria_pot_directa_opt', _bateriaPotDirectaController.text);
+    await prefs.setString('bateria_mwh_directa_opt', _bateriaMwhDirectaController.text);
+    await prefs.setString('coste_bat_valor_opt', _costeBatValorController.text);
+    await prefs.setString('coste_bat_unidad_opt', _costeBatUnidad);
+    await prefs.setString('tasa_detalle_opt', _tasaDetalle);
+
+    if (_modo == 'solo_fv') {
+      await _calcularEscenarioDirecto(conBateria: false);
+    } else if (_modo == 'solo_bateria') {
+      await _calcularEscenarioDirecto(conBateria: true);
+    } else {
+      await _optimizarDiseno();
+    }
   }
 
   Future<void> _aplicarHorasATodos() async {
     final prefs = await SharedPreferences.getInstance();
-    String ini = hInicioMes[_mesHorasSeleccionado]!;
-    String fin = hFinMes[_mesHorasSeleccionado]!;
+    String ini = hInicioMes[_mesHorasSeleccionado] ?? '1';
+    String fin = hFinMes[_mesHorasSeleccionado] ?? '4';
     for (String m in mesesNombres) {
       hInicioMes[m] = ini;
       hFinMes[m] = fin;
@@ -229,6 +268,230 @@ class _DisenoOptimoAuditoriaScreenState extends State<DisenoOptimoAuditoriaScree
     return maxDrenaje / 0.9;
   }
 
+  List<bool> _construirMercadoActivo() {
+    List<bool> isMercadoActivoList = List.filled(8760, false);
+    if (_mercadoGlobalActivo) {
+      for (int h = 0; h < 8760; h++) {
+        int mesIdx = _mesDeCadaHora[h];
+        String nombreMes = mesesNombres[mesIdx];
+        int hIni = int.tryParse(hInicioMes[nombreMes] ?? '1') ?? 1;
+        int hFin = int.tryParse(hFinMes[nombreMes] ?? '4') ?? 4;
+        int hrDia = h % 24;
+        List<int> hList = [];
+        int actual = hIni;
+        while (true) {
+          hList.add(actual);
+          if (actual == hFin) break;
+          actual = (actual + 1) % 24;
+        }
+        isMercadoActivoList[h] = hList.contains(hrDia);
+      }
+    }
+    return isMercadoActivoList;
+  }
+
+  // Simula un año (8760h) con una FV y batería DADAS (no se buscan). Sin
+  // batería (bateriaInst=0) es el escenario "Solo FV": lo que sobra se vende
+  // a mercado, lo que falta se compra de mercado, hora a hora. Con batería,
+  // esta amortigua primero y solo se recurre a la red cuando se agota (o se
+  // llena) — el "1 ciclo/día" natural de carga de día y descarga de noche.
+  Map<String, double> _simularAnio(double pot, double bateriaInst, double bloqueObjetivo, List<double> radiacion, List<double> precios, List<bool> isMercadoActivoList, double limitIny) {
+    double soc = bateriaInst;
+    double totalGen = 0, totalIny = 0, totalWasted = 0, totalMktRev = 0, totalGridCost = 0;
+    for (int h = 0; h < 8760; h++) {
+      double genHr = radiacion[h] * pot;
+      totalGen += genHr;
+      double precioHr = precios[h];
+      bool inMkt = isMercadoActivoList[h];
+      double socNext;
+      double compraRedBase;
+      if (inMkt) {
+        socNext = soc + genHr;
+        compraRedBase = bloqueObjetivo;
+      } else {
+        socNext = soc + (genHr - bloqueObjetivo);
+        compraRedBase = 0;
+      }
+      double curt = 0;
+      if (socNext > bateriaInst) {
+        curt = socNext - bateriaInst;
+        socNext = bateriaInst;
+      }
+      double extra = 0;
+      if (socNext < 0) {
+        extra = -socNext;
+        socNext = 0;
+      }
+      double injected = min(curt, limitIny);
+      double wasted = curt - injected;
+      totalIny += injected;
+      totalWasted += wasted;
+      totalMktRev += injected * precioHr;
+      totalGridCost += (compraRedBase + extra) * precioHr;
+      soc = socNext;
+    }
+    return {'gen': totalGen, 'iny': totalIny, 'wasted': totalWasted, 'mktRev': totalMktRev, 'gridCost': totalGridCost};
+  }
+
+  // Modos "Solo FV" / "Solo Batería": FV (y batería) son datos directos. En vez
+  // de asumir un precio PPA, se resuelve algebraicamente el precio (LCOE) que
+  // hace VAN=0 a una tasa objetivo fija (5% y 10%): como los ingresos PPA son
+  // lineales en el precio (bloque × 8760h × precio cada año) y el resto de la
+  // caja no depende del precio, VAN(r) = a(r) + b(r)·precio es una recta, y el
+  // precio que la anula sale de forma directa (sin bisección ni tanteo).
+  Future<void> _calcularEscenarioDirecto({required bool conBateria}) async {
+    setState(() {
+      _calculando = true;
+      _mensajeError = null;
+    });
+
+    final prefs = await SharedPreferences.getInstance();
+    List<String>? radStrs = prefs.getStringList('radiacion_8760');
+    List<String>? preStrs = prefs.getStringList('precios_8760');
+
+    if (radStrs == null || preStrs == null || radStrs.length < 8760 || preStrs.length < 8760) {
+      setState(() {
+        _calculando = false;
+        fvOptimaMostrar = 'Faltan Datos';
+        bateriaOptimaMostrar = 'Ve a Inicio';
+      });
+      return;
+    }
+
+    List<double> radiacionBase = radStrs.map((e) => double.parse(e)).toList();
+    List<double> precios = preStrs.map((e) => double.parse(e)).toList();
+
+    double bloqueObjetivo = double.tryParse(_bloqueObjetivoController.text.replaceAll(',', '.')) ?? 1.0;
+    double horasEq = double.tryParse(_horasEqController.text.replaceAll(',', '.')) ?? 2100.0;
+    double pot = double.tryParse(_fvDirectaController.text.replaceAll(',', '.')) ?? 0.0;
+    double bateriaPotMW = conBateria ? (double.tryParse(_bateriaPotDirectaController.text.replaceAll(',', '.')) ?? 0.0) : 0.0;
+    double bateriaInst = conBateria ? (double.tryParse(_bateriaMwhDirectaController.text.replaceAll(',', '.')) ?? 0.0) : 0.0;
+    int vidaUtil = int.tryParse(_vidaUtilController.text) ?? 25;
+    double deg = double.tryParse(_degradacionController.text.replaceAll(',', '.')) ?? 0.5;
+    double limitIny = double.tryParse(_limiteInyController.text.replaceAll(',', '.')) ?? 15.0;
+    double opexFijo = double.tryParse(_opexFijoController.text.replaceAll(',', '.')) ?? 1500;
+    double opexVar = double.tryParse(_opexVariableController.text.replaceAll(',', '.')) ?? 5;
+    double escaladaPrecio = double.tryParse(_escaladaPrecioController.text.replaceAll(',', '.')) ?? 0.0;
+    int anoReemplazo = int.tryParse(_anoReemplazoController.text) ?? 12;
+    double costeReemplazoUnit = double.tryParse(_costeReemplazoController.text.replaceAll(',', '.')) ?? 100000;
+
+    double capexTotal;
+    if (conBateria) {
+      double costeBatValor = double.tryParse(_costeBatValorController.text.replaceAll(',', '.')) ?? 0.0;
+      double costeBatPorMW = _costeBatUnidad == 'kW' ? costeBatValor * 1000 : costeBatValor;
+      capexTotal = bateriaPotMW * costeBatPorMW;
+    } else {
+      double costeFvKw = double.tryParse(_costeFvKwController.text.replaceAll(',', '.')) ?? 0.0;
+      capexTotal = pot * 1000 * costeFvKw;
+    }
+
+    double rBaseAnnual = radiacionBase.fold(0.0, (sum, item) => sum + item);
+    List<double> radiacion = rBaseAnnual > 0 ? radiacionBase.map((e) => e * horasEq / rBaseAnnual).toList() : List.filled(8760, 0.0);
+    // "Solo FV" no tiene batería: no existen "horas de entrada a mercado" como
+    // ventana de arbitraje (eso solo tiene sentido si hay batería que aprovechar).
+    // Cada hora se resuelve solo por generación vs bloque: sobra → se vende a
+    // mercado; falta (incluida toda hora sin sol) → se compra a mercado.
+    List<bool> isMercadoActivoList = conBateria ? _construirMercadoActivo() : List.filled(8760, false);
+
+    double kPpaPorAnio = bloqueObjetivo * 24 * 365;
+
+    List<double> flujosBaseSinPpa = [];
+    List<double> gridCostPorAnio = [], mktRevPorAnio = [], opexPorAnio = [], genPorAnio = [], inyPorAnio = [];
+    double acuOpex = 0.0, acuReemplazo = 0.0, totalGenLife = 0.0;
+
+    for (int y = 1; y <= vidaUtil; y++) {
+      double degMult = pow(1 - (deg / 100), y - 1).toDouble();
+      double potY = pot * degMult;
+      Map<String, double> res = _simularAnio(potY, bateriaInst, bloqueObjetivo, radiacion, precios, isMercadoActivoList, limitIny);
+      double escalMult = pow(1 + (escaladaPrecio / 100), y - 1).toDouble();
+      double mktRevY = res['mktRev']! * escalMult;
+      double gridCostY = res['gridCost']! * escalMult;
+      double opexY = opexFijo + (opexVar * res['gen']!);
+      double rep = 0.0;
+      if (conBateria && y == anoReemplazo) {
+        rep = bateriaInst * costeReemplazoUnit;
+        acuReemplazo += rep;
+      }
+      flujosBaseSinPpa.add(mktRevY - gridCostY - opexY - rep);
+      gridCostPorAnio.add(gridCostY);
+      mktRevPorAnio.add(mktRevY);
+      opexPorAnio.add(opexY);
+      genPorAnio.add(res['gen']!);
+      inyPorAnio.add(res['iny']!);
+      acuOpex += opexY;
+      totalGenLife += res['gen']!;
+    }
+
+    double resolverPrecio(double tasa) {
+      double a = -capexTotal;
+      double b = 0.0;
+      for (int y = 1; y <= vidaUtil; y++) {
+        double disc = pow(1 + tasa, y).toDouble();
+        b += kPpaPorAnio / disc;
+        a += flujosBaseSinPpa[y - 1] / disc;
+      }
+      return b != 0 ? -a / b : 0.0;
+    }
+
+    double precio5 = resolverPrecio(0.05);
+    double precio10 = resolverPrecio(0.10);
+    double precioManual = double.tryParse(_precioPpaController.text.replaceAll(',', '.')) ?? 0.0;
+    double precioDetalle = _tasaDetalle == '5' ? precio5 : (_tasaDetalle == '10' ? precio10 : precioManual);
+    double ppaRevAnual = kPpaPorAnio * precioDetalle;
+
+    List<FlSpot> spots = [FlSpot(0, -capexTotal / 1000000)];
+    double cumulative = -capexTotal;
+    minRoiY = cumulative / 1000000;
+    maxRoiY = 0;
+    double acuIngresosPpa = 0.0, acuIngresosMkt = 0.0, acuCosteRed = 0.0;
+    List<double> flujosCaja = [-capexTotal];
+
+    for (int y = 1; y <= vidaUtil; y++) {
+      double cf = ppaRevAnual + flujosBaseSinPpa[y - 1];
+      acuIngresosPpa += ppaRevAnual;
+      acuIngresosMkt += mktRevPorAnio[y - 1];
+      acuCosteRed += gridCostPorAnio[y - 1];
+      flujosCaja.add(cf);
+      cumulative += cf;
+      double cumM = cumulative / 1000000;
+      spots.add(FlSpot(y.toDouble(), cumM));
+      if (cumM < minRoiY) minRoiY = cumM;
+      if (cumM > maxRoiY) maxRoiY = cumM;
+    }
+
+    double tirCalculada = _calcularTIR(flujosCaja);
+    double totalCosteLife = capexTotal + acuOpex + acuCosteRed + acuReemplazo;
+    double lcoeClasico = totalGenLife > 0 ? (totalCosteLife / totalGenLife) : 0.0;
+
+    setState(() {
+      _calculando = false;
+      fvOptimaMostrar = formatoEuro(pot);
+      bateriaOptimaMostrar = formatoEuro(bateriaInst);
+      bloqueFijoMaxMostrar = formatoEuro(bloqueObjetivo);
+      lcoe5Mostrar = formatoEuro(precio5);
+      lcoe10Mostrar = formatoEuro(precio10);
+      lcoeMostrar = formatoEuro(lcoeClasico);
+      inyeccionRedMostrar = formatoEuro(inyPorAnio[0] / 1000);
+      tirMostrar = formatoEuro(tirCalculada);
+
+      ingresosPpaY1 = formatoEuro(ppaRevAnual);
+      ingresosMktY1 = formatoEuro(mktRevPorAnio[0]);
+      costeRedY1 = formatoEuro(-gridCostPorAnio[0]);
+      opexY1 = formatoEuro(opexPorAnio[0]);
+      capexTotalStr = formatoEuro(capexTotal);
+      flujoCajaY1 = formatoEuro(flujosCaja[1]);
+
+      ingresosPpaLife = formatoEuro(acuIngresosPpa);
+      ingresosMktLife = formatoEuro(acuIngresosMkt);
+      costeRedLife = formatoEuro(-acuCosteRed);
+      opexLife = formatoEuro(acuOpex);
+      reemplazoLife = formatoEuro(acuReemplazo);
+      beneficioNetoLife = formatoEuro(cumulative + capexTotal);
+      beneficioNetoTotalLife = formatoEuro(cumulative);
+      roiSpots = spots;
+    });
+  }
+
   Future<void> _optimizarDiseno() async {
     setState(() {
       _calculando = true;
@@ -236,14 +499,14 @@ class _DisenoOptimoAuditoriaScreenState extends State<DisenoOptimoAuditoriaScree
     });
 
     final prefs = await SharedPreferences.getInstance();
-    List<String>? radStrs = prefs.getStringList('radiacion_8760_aud');
-    List<String>? preStrs = prefs.getStringList('precios_8760_aud');
+    List<String>? radStrs = prefs.getStringList('radiacion_8760');
+    List<String>? preStrs = prefs.getStringList('precios_8760');
 
     if (radStrs == null || preStrs == null || radStrs.length < 8760 || preStrs.length < 8760) {
       setState(() {
         _calculando = false;
         fvOptimaMostrar = 'Faltan Datos';
-        bateriaOptimaMostrar = 'Ve a Base de Datos';
+        bateriaOptimaMostrar = 'Ve a Inicio';
       });
       return;
     }
@@ -270,24 +533,7 @@ class _DisenoOptimoAuditoriaScreenState extends State<DisenoOptimoAuditoriaScree
     // reescalada para que su suma anual sea "Horas Equivalentes".
     List<double> radiacion = rBaseAnnual > 0 ? radiacionBase.map((e) => e * horasEq / rBaseAnnual).toList() : List.filled(8760, 0.0);
 
-    List<bool> isMercadoActivoList = List.filled(8760, false);
-    if (_mercadoGlobalActivo) {
-      for (int h = 0; h < 8760; h++) {
-        int mesIdx = _mesDeCadaHora[h];
-        String nombreMes = mesesNombres[mesIdx];
-        int hIni = int.tryParse(hInicioMes[nombreMes] ?? '1') ?? 1;
-        int hFin = int.tryParse(hFinMes[nombreMes] ?? '4') ?? 4;
-        int hrDia = h % 24;
-        List<int> hList = [];
-        int actual = hIni;
-        while (true) {
-          hList.add(actual);
-          if (actual == hFin) break;
-          actual = (actual + 1) % 24;
-        }
-        isMercadoActivoList[h] = hList.contains(hrDia);
-      }
-    }
+    List<bool> isMercadoActivoList = _construirMercadoActivo();
 
     // 1. Batería mínima absoluta (aunque instalaras FV infinita)
     double bateriaMinAbs = _calcularBateriaMinimaAbsoluta(bloqueObjetivo, radiacion, isMercadoActivoList);
@@ -678,6 +924,146 @@ class _DisenoOptimoAuditoriaScreenState extends State<DisenoOptimoAuditoriaScree
     );
   }
 
+  Widget _legendaDot(Color color, String texto, bool isDark) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(width: 10, height: 10, decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
+        const SizedBox(width: 6),
+        Text(texto, style: TextStyle(fontSize: 12, color: isDark ? Colors.white70 : Colors.black87)),
+      ],
+    );
+  }
+
+  // Desplegable explicativo de "Solo FV": sin batería, cada hora se decide solo
+  // comparando generación vs bloque. La gráfica es un día TIPO ilustrativo (no
+  // sale de la simulación real de 8760h) para que se vea de un vistazo el
+  // mecanismo: mediodía sobra energía (se vende a mercado), noche/bajo sol
+  // falta (se compra a mercado).
+  Widget _buildExplicacionSoloFv(bool isDark) {
+    double potEj = double.tryParse(_fvDirectaController.text.replaceAll(',', '.')) ?? 10.0;
+    double bloqueEj = double.tryParse(_bloqueObjetivoController.text.replaceAll(',', '.')) ?? 2.0;
+    if (potEj <= 0) potEj = 10.0;
+    if (bloqueEj <= 0) bloqueEj = 2.0;
+
+    List<double> genDia = List.generate(24, (h) {
+      if (h < 6 || h > 20) return 0.0;
+      double x = (h - 6) / 14.0;
+      return potEj * sin(x * pi).clamp(0.0, 1.0);
+    });
+    List<double> ventaMercado = List.generate(24, (h) => max(0.0, genDia[h] - bloqueEj));
+    List<double> compraMercado = List.generate(24, (h) => max(0.0, bloqueEj - genDia[h]));
+    double maxY = [potEj, bloqueEj].reduce(max) + 1;
+
+    return Card(
+      color: Theme.of(context).colorScheme.surface,
+      elevation: isDark ? 4 : 2,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      clipBehavior: Clip.antiAlias,
+      child: Theme(
+        data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+        child: ExpansionTile(
+          initiallyExpanded: false,
+          leading: Icon(Icons.help_outline, color: isDark ? accentMagenta : Colors.orange),
+          title: Text('¿Cómo funciona "Solo FV"?', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: isDark ? Colors.white : Colors.black87)),
+          subtitle: Text('Explicación + día tipo', style: TextStyle(fontSize: 12, color: isDark ? Colors.grey : Colors.black54)),
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Sin batería, cada hora se resuelve sola comparando la generación FV con el Bloque de Potencia Objetivo:\n\n'
+                    '• Si generas MÁS que el bloque (típicamente al mediodía) → el excedente se vende al precio de mercado de esa hora.\n'
+                    '• Si generas MENOS que el bloque (mañana, tarde y toda la noche) → la diferencia se compra al mercado para completar el compromiso.\n\n'
+                    'El bloque en sí se cobra siempre al precio pactado (LCOE resuelto o tu PPA manual) las 8.760 horas del año, venga esa energía de tu FV o de la red.',
+                    style: TextStyle(fontSize: 13, height: 1.5, color: isDark ? Colors.grey : Colors.black87),
+                  ),
+                  const SizedBox(height: 16),
+                  Text('Día tipo (ilustrativo)', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: isDark ? Colors.white : Colors.blueGrey)),
+                  const SizedBox(height: 8),
+                  SizedBox(
+                    height: 240,
+                    child: LineChart(
+                      LineChartData(
+                        minX: 0,
+                        maxX: 23,
+                        minY: 0,
+                        maxY: maxY,
+                        gridData: FlGridData(show: true, drawVerticalLine: false, getDrawingHorizontalLine: (v) => FlLine(color: isDark ? Colors.white10 : Colors.black12, strokeWidth: 1)),
+                        titlesData: FlTitlesData(
+                          rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                          topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                          bottomTitles: AxisTitles(sideTitles: SideTitles(showTitles: true, interval: 3, getTitlesWidget: (v, m) => Padding(padding: const EdgeInsets.only(top: 8.0), child: Text('${v.toInt()}:00', style: TextStyle(fontSize: 10, color: isDark ? Colors.grey : Colors.black54))))),
+                          leftTitles: AxisTitles(sideTitles: SideTitles(showTitles: true, reservedSize: 36, getTitlesWidget: (v, m) => Text(v.toStringAsFixed(0), style: TextStyle(fontSize: 10, color: isDark ? Colors.grey : Colors.black54)))),
+                        ),
+                        borderData: FlBorderData(show: false),
+                        lineTouchData: LineTouchData(
+                          touchTooltipData: LineTouchTooltipData(
+                            getTooltipItems: (spots) => spots.map((s) {
+                              String tipo = s.barIndex == 0 ? 'Generación' : (s.barIndex == 1 ? 'Bloque' : (s.barIndex == 2 ? 'Vendido a Mercado' : 'Comprado a Mercado'));
+                              return LineTooltipItem('$tipo\n${s.x.toInt()}:00 → ${s.y.toStringAsFixed(1)} MW', const TextStyle(color: Colors.white, fontWeight: FontWeight.bold));
+                            }).toList(),
+                          ),
+                        ),
+                        lineBarsData: [
+                          LineChartBarData(
+                            spots: List.generate(24, (i) => FlSpot(i.toDouble(), genDia[i])),
+                            isCurved: true,
+                            color: Colors.lightGreen,
+                            barWidth: 3,
+                            dotData: const FlDotData(show: false),
+                            belowBarData: BarAreaData(show: true, color: Colors.lightGreen.withValues(alpha: 0.25)),
+                          ),
+                          LineChartBarData(
+                            spots: [FlSpot(0, bloqueEj), FlSpot(23, bloqueEj)],
+                            isCurved: false,
+                            color: Colors.orange,
+                            barWidth: 2.5,
+                            dotData: const FlDotData(show: false),
+                            dashArray: [6, 4],
+                          ),
+                          LineChartBarData(
+                            spots: List.generate(24, (i) => FlSpot(i.toDouble(), ventaMercado[i])),
+                            isCurved: true,
+                            color: Colors.blue,
+                            barWidth: 2,
+                            dotData: const FlDotData(show: false),
+                            belowBarData: BarAreaData(show: true, color: Colors.blue.withValues(alpha: 0.35)),
+                          ),
+                          LineChartBarData(
+                            spots: List.generate(24, (i) => FlSpot(i.toDouble(), compraMercado[i])),
+                            isCurved: true,
+                            color: Colors.redAccent,
+                            barWidth: 2,
+                            dotData: const FlDotData(show: false),
+                            belowBarData: BarAreaData(show: true, color: Colors.redAccent.withValues(alpha: 0.35)),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  Wrap(
+                    spacing: 16,
+                    runSpacing: 6,
+                    children: [
+                      _legendaDot(Colors.lightGreen, 'Generación FV', isDark),
+                      _legendaDot(Colors.orange, 'Bloque Objetivo', isDark),
+                      _legendaDot(Colors.blue, 'Vendido a Mercado (sobra)', isDark),
+                      _legendaDot(Colors.redAccent, 'Comprado a Mercado (falta)', isDark),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     bool isDark = Theme.of(context).brightness == Brightness.dark;
@@ -694,14 +1080,52 @@ class _DisenoOptimoAuditoriaScreenState extends State<DisenoOptimoAuditoriaScree
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
+                  _buildSeccionHeader('Modo de Diseño', Icons.rule, Colors.indigo, isDark),
+                  SegmentedButton<String>(
+                    segments: const [
+                      ButtonSegment(value: 'optimizar', label: Text('Optimizar', style: TextStyle(fontSize: 12)), icon: Icon(Icons.auto_fix_high, size: 16)),
+                      ButtonSegment(value: 'solo_fv', label: Text('Solo FV', style: TextStyle(fontSize: 12)), icon: Icon(Icons.wb_sunny, size: 16)),
+                      ButtonSegment(value: 'solo_bateria', label: Text('Solo Batería', style: TextStyle(fontSize: 12)), icon: Icon(Icons.battery_charging_full, size: 16)),
+                    ],
+                    selected: {_modo},
+                    onSelectionChanged: (Set<String> nuevo) {
+                      setState(() => _modo = nuevo.first);
+                      _guardarYCalcular();
+                    },
+                  ),
+                  const SizedBox(height: 16),
+
                   _buildSeccionHeader('Bloque Objetivo y Costes', Icons.tune, Colors.indigo, isDark),
-                  _buildInputCard([
-                    _buildInputField('Bloque Potencia Objetivo', _bloqueObjetivoController, 'MW', isDark),
-                    _buildInputField('Horas Equivalentes', _horasEqController, 'h/año', isDark),
-                    _buildInputField('Coste Unitario FV', _costeFvController, '€/MW', isDark),
-                    _buildInputField('Coste Unitario Batería', _costeBatController, '€/MWh', isDark),
-                    _buildInputField('Vida Útil Proyecto', _vidaUtilController, 'Años', isDark),
-                  ], isDark),
+                  if (_modo == 'optimizar')
+                    _buildInputCard([
+                      _buildInputField('Bloque Potencia Objetivo', _bloqueObjetivoController, 'MW', isDark),
+                      _buildInputField('Horas Equivalentes', _horasEqController, 'h/año', isDark),
+                      _buildInputField('Coste Unitario FV', _costeFvController, '€/MW', isDark),
+                      _buildInputField('Coste Unitario Batería', _costeBatController, '€/MWh', isDark),
+                      _buildInputField('Vida Útil Proyecto', _vidaUtilController, 'Años', isDark),
+                    ], isDark)
+                  else if (_modo == 'solo_fv')
+                    _buildInputCard([
+                      _buildInputField('Bloque Potencia Objetivo', _bloqueObjetivoController, 'MW', isDark),
+                      _buildInputField('Horas Equivalentes', _horasEqController, 'h/año', isDark),
+                      _buildInputField('Potencia FV', _fvDirectaController, 'MW', isDark),
+                      _buildInputField('CAPEX FV', _costeFvKwController, '€/kW', isDark),
+                      _buildInputField('Vida Útil Proyecto', _vidaUtilController, 'Años', isDark),
+                    ], isDark)
+                  else
+                    _buildInputCard([
+                      _buildInputField('Bloque Potencia Objetivo', _bloqueObjetivoController, 'MW', isDark),
+                      _buildInputField('Horas Equivalentes', _horasEqController, 'h/año', isDark),
+                      _buildInputField('Potencia FV', _fvDirectaController, 'MW', isDark),
+                      _buildInputField('Potencia Batería', _bateriaPotDirectaController, 'MW', isDark),
+                      _buildInputField('Capacidad Batería', _bateriaMwhDirectaController, 'MWh', isDark),
+                      _buildDropdownFieldStr('Unidad CAPEX Batería', _costeBatUnidad, const ['kW', 'MW'], (val) {
+                        setState(() => _costeBatUnidad = val!);
+                        _guardarYCalcular();
+                      }, isDark),
+                      _buildInputField('CAPEX Batería', _costeBatValorController, '€/$_costeBatUnidad', isDark),
+                      _buildInputField('Vida Útil Proyecto', _vidaUtilController, 'Años', isDark),
+                    ], isDark),
                   const SizedBox(height: 16),
 
                   _buildSeccionHeader('Degradación e Inyección', Icons.trending_down, Colors.teal, isDark),
@@ -711,69 +1135,100 @@ class _DisenoOptimoAuditoriaScreenState extends State<DisenoOptimoAuditoriaScree
                   ], isDark),
                   const SizedBox(height: 16),
 
-                  _buildSeccionHeader('Horas Mercado (Red)', Icons.access_time, Colors.orange, isDark),
-                  Card(
-                    color: Theme.of(context).colorScheme.surface,
-                    elevation: isDark ? 4 : 2,
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                    child: Padding(
-                      padding: const EdgeInsets.all(16.0),
-                      child: Column(
-                        children: [
-                          SwitchListTile(
-                            title: Text('Permitir Entrada a Mercado', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: isDark ? Colors.white : Colors.black87)),
-                            value: _mercadoGlobalActivo,
-                            activeThumbColor: isDark ? accentMagenta : Colors.orange,
-                            dense: true,
-                            contentPadding: EdgeInsets.zero,
-                            onChanged: (val) {
-                              setState(() => _mercadoGlobalActivo = val);
-                              _guardarYCalcular();
-                            },
-                          ),
-                          const Divider(),
-                          _buildDropdownFieldStr('Mes a editar', _mesHorasSeleccionado, mesesNombres, (val) {
-                            setState(() => _mesHorasSeleccionado = val!);
-                          }, isDark),
-                          _buildDropdownFieldHoras('Hora Inicio', hInicioMes[_mesHorasSeleccionado] ?? '1', (val) {
-                            setState(() => hInicioMes[_mesHorasSeleccionado] = val!);
-                            _guardarYCalcular();
-                          }, isDark),
-                          _buildDropdownFieldHoras('Hora Fin', hFinMes[_mesHorasSeleccionado] ?? '4', (val) {
-                            setState(() => hFinMes[_mesHorasSeleccionado] = val!);
-                            _guardarYCalcular();
-                          }, isDark),
-                          const SizedBox(height: 8),
-                          SizedBox(
-                            width: double.infinity,
-                            child: OutlinedButton.icon(
-                              onPressed: _aplicarHorasATodos,
-                              icon: Icon(Icons.copy_all, size: 16, color: isDark ? Colors.white : Colors.orange),
-                              label: Text('Aplicar a todos los meses', style: TextStyle(color: isDark ? Colors.white : Colors.orange)),
-                              style: OutlinedButton.styleFrom(side: BorderSide(color: isDark ? accentMagenta : Colors.orange)),
+                  if (_modo != 'solo_fv') ...[
+                    _buildSeccionHeader('Horas Mercado (Red)', Icons.access_time, Colors.orange, isDark),
+                    Card(
+                      color: Theme.of(context).colorScheme.surface,
+                      elevation: isDark ? 4 : 2,
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                      child: Padding(
+                        padding: const EdgeInsets.all(16.0),
+                        child: Column(
+                          children: [
+                            SwitchListTile(
+                              title: Text('Permitir Entrada a Mercado', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: isDark ? Colors.white : Colors.black87)),
+                              value: _mercadoGlobalActivo,
+                              activeThumbColor: isDark ? accentMagenta : Colors.orange,
+                              dense: true,
+                              contentPadding: EdgeInsets.zero,
+                              onChanged: (val) {
+                                setState(() => _mercadoGlobalActivo = val);
+                                _guardarYCalcular();
+                              },
                             ),
-                          ),
-                        ],
+                            const Divider(),
+                            _buildDropdownFieldStr('Mes a editar', _mesHorasSeleccionado, mesesNombres, (val) {
+                              setState(() => _mesHorasSeleccionado = val!);
+                            }, isDark),
+                            _buildDropdownFieldHoras('Hora Inicio', hInicioMes[_mesHorasSeleccionado] ?? '1', (val) {
+                              setState(() => hInicioMes[_mesHorasSeleccionado] = val!);
+                              _guardarYCalcular();
+                            }, isDark),
+                            _buildDropdownFieldHoras('Hora Fin', hFinMes[_mesHorasSeleccionado] ?? '4', (val) {
+                              setState(() => hFinMes[_mesHorasSeleccionado] = val!);
+                              _guardarYCalcular();
+                            }, isDark),
+                            const SizedBox(height: 8),
+                            SizedBox(
+                              width: double.infinity,
+                              child: OutlinedButton.icon(
+                                onPressed: _aplicarHorasATodos,
+                                icon: Icon(Icons.copy_all, size: 16, color: isDark ? Colors.white : Colors.orange),
+                                label: Text('Aplicar a todos los meses', style: TextStyle(color: isDark ? Colors.white : Colors.orange)),
+                                style: OutlinedButton.styleFrom(side: BorderSide(color: isDark ? accentMagenta : Colors.orange)),
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
                     ),
-                  ),
-                  const SizedBox(height: 16),
+                    const SizedBox(height: 16),
+                  ] else
+                    Card(
+                      color: Colors.blue.withValues(alpha: 0.1),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: BorderSide(color: Colors.blue.withValues(alpha: 0.3))),
+                      child: Padding(
+                        padding: const EdgeInsets.all(12.0),
+                        child: Row(
+                          children: [
+                            const Icon(Icons.info_outline, color: Colors.blue, size: 18),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Text(
+                                'Sin batería no hay ventana de "entrada a mercado": cada hora se resuelve solo por generación vs bloque (ver explicación abajo).',
+                                style: TextStyle(fontSize: 12, color: isDark ? Colors.white70 : Colors.black87),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  if (_modo == 'solo_fv') const SizedBox(height: 16),
 
-                  _buildSeccionHeader('Costes Operativos y PPA', Icons.attach_money, Colors.green, isDark),
+                  _buildSeccionHeader(_modo == 'optimizar' ? 'Costes Operativos y PPA' : 'Costes Operativos', Icons.attach_money, Colors.green, isDark),
                   _buildInputCard([
                     _buildInputField('OPEX Fijo', _opexFijoController, '€/año', isDark),
                     _buildInputField('OPEX Variable', _opexVariableController, '€/MWh', isDark),
-                    _buildInputField('Precio Acuerdo PPA', _precioPpaController, '€/MWh', isDark),
+                    if (_modo == 'optimizar') _buildInputField('Precio Acuerdo PPA', _precioPpaController, '€/MWh', isDark),
                     _buildInputField('Escalada Precio Mercado', _escaladaPrecioController, '%/año', isDark),
+                    if (_modo != 'optimizar')
+                      _buildDropdownFieldStr('Detalle a Mostrar', _tasaDetalle == '5' ? 'LCOE @ 5% TIR' : (_tasaDetalle == '10' ? 'LCOE @ 10% TIR' : 'Precio PPA Manual'),
+                          const ['LCOE @ 5% TIR', 'LCOE @ 10% TIR', 'Precio PPA Manual'], (val) {
+                        setState(() => _tasaDetalle = val == 'LCOE @ 5% TIR' ? '5' : (val == 'LCOE @ 10% TIR' ? '10' : 'manual'));
+                        _guardarYCalcular();
+                      }, isDark),
+                    if (_modo != 'optimizar' && _tasaDetalle == 'manual') _buildInputField('Precio PPA Manual', _precioPpaController, '€/MWh', isDark),
                   ], isDark),
                   const SizedBox(height: 16),
 
-                  _buildSeccionHeader('Reemplazo BESS', Icons.battery_charging_full, Colors.purple, isDark),
-                  _buildInputCard([
-                    _buildInputField('Año de Reemplazo', _anoReemplazoController, 'Años', isDark),
-                    _buildInputField('Coste Reemplazo', _costeReemplazoController, '€/MWh', isDark),
-                  ], isDark),
-                  const SizedBox(height: 16),
+                  if (_modo != 'solo_fv') ...[
+                    _buildSeccionHeader('Reemplazo BESS', Icons.battery_charging_full, Colors.purple, isDark),
+                    _buildInputCard([
+                      _buildInputField('Año de Reemplazo', _anoReemplazoController, 'Años', isDark),
+                      _buildInputField('Coste Reemplazo', _costeReemplazoController, '€/MWh', isDark),
+                    ], isDark),
+                    const SizedBox(height: 16),
+                  ],
 
                   Container(
                     decoration: BoxDecoration(
@@ -785,7 +1240,7 @@ class _DisenoOptimoAuditoriaScreenState extends State<DisenoOptimoAuditoriaScree
                       icon: _calculando
                           ? const SizedBox(height: 18, width: 18, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
                           : const Icon(Icons.auto_fix_high, color: Colors.white),
-                      label: Text(_calculando ? 'OPTIMIZANDO...' : 'OPTIMIZAR DISEÑO', style: const TextStyle(letterSpacing: 1.2, fontWeight: FontWeight.bold, color: Colors.white)),
+                      label: Text(_calculando ? 'CALCULANDO...' : (_modo == 'optimizar' ? 'OPTIMIZAR DISEÑO' : 'CALCULAR LCOE'), style: const TextStyle(letterSpacing: 1.2, fontWeight: FontWeight.bold, color: Colors.white)),
                       style: ElevatedButton.styleFrom(
                         backgroundColor: Colors.transparent,
                         shadowColor: Colors.transparent,
@@ -828,22 +1283,44 @@ class _DisenoOptimoAuditoriaScreenState extends State<DisenoOptimoAuditoriaScree
                   if (_mensajeError != null) const SizedBox(height: 16),
 
                   // KPIs Row
-                  Row(
-                    children: [
-                      Expanded(child: _buildKPICardSimple('BLOQUE CONSEGUIDO', bloqueFijoMaxMostrar, 'MW', Colors.deepPurple, isDark, onTapIcon: () => _mostrarExplicacion('bloque', isDark))),
-                      const SizedBox(width: 12),
-                      Expanded(child: _buildKPICardSimple('FV ÓPTIMA', fvOptimaMostrar, 'MW', Colors.orange, isDark, onTapIcon: () => _mostrarExplicacion('fv', isDark))),
-                      const SizedBox(width: 12),
-                      Expanded(child: _buildKPICardSimple('BATERÍA ÓPTIMA', bateriaOptimaMostrar, 'MWh', Colors.purple, isDark, onTapIcon: () => _mostrarExplicacion('bat', isDark))),
-                      const SizedBox(width: 12),
-                      Expanded(child: _buildKPICardSimple('LCOE', lcoeMostrar, '€/MWh', Colors.indigo, isDark)),
-                      const SizedBox(width: 12),
-                      Expanded(child: _buildKPICardSimple('INYECCIÓN RED Y1', inyeccionRedMostrar, 'GWh', Colors.blue, isDark)),
-                      const SizedBox(width: 12),
-                      Expanded(child: _buildKPICardSimple('TIR', tirMostrar, '%', Colors.teal, isDark)),
-                    ],
-                  ),
+                  if (_modo == 'optimizar')
+                    Row(
+                      children: [
+                        Expanded(child: _buildKPICardSimple('BLOQUE CONSEGUIDO', bloqueFijoMaxMostrar, 'MW', Colors.deepPurple, isDark, onTapIcon: () => _mostrarExplicacion('bloque', isDark))),
+                        const SizedBox(width: 12),
+                        Expanded(child: _buildKPICardSimple('FV ÓPTIMA', fvOptimaMostrar, 'MW', Colors.orange, isDark, onTapIcon: () => _mostrarExplicacion('fv', isDark))),
+                        const SizedBox(width: 12),
+                        Expanded(child: _buildKPICardSimple('BATERÍA ÓPTIMA', bateriaOptimaMostrar, 'MWh', Colors.purple, isDark, onTapIcon: () => _mostrarExplicacion('bat', isDark))),
+                        const SizedBox(width: 12),
+                        Expanded(child: _buildKPICardSimple('LCOE', lcoeMostrar, '€/MWh', Colors.indigo, isDark)),
+                        const SizedBox(width: 12),
+                        Expanded(child: _buildKPICardSimple('INYECCIÓN RED Y1', inyeccionRedMostrar, 'GWh', Colors.blue, isDark)),
+                        const SizedBox(width: 12),
+                        Expanded(child: _buildKPICardSimple('TIR', tirMostrar, '%', Colors.teal, isDark)),
+                      ],
+                    )
+                  else
+                    Row(
+                      children: [
+                        Expanded(child: _buildKPICardSimple('BLOQUE OBJETIVO', bloqueFijoMaxMostrar, 'MW', Colors.deepPurple, isDark)),
+                        const SizedBox(width: 12),
+                        Expanded(child: _buildKPICardSimple('LCOE @ 5% TIR', lcoe5Mostrar, '€/MWh', Colors.orange, isDark)),
+                        const SizedBox(width: 12),
+                        Expanded(child: _buildKPICardSimple('LCOE @ 10% TIR', lcoe10Mostrar, '€/MWh', Colors.deepOrange, isDark)),
+                        const SizedBox(width: 12),
+                        Expanded(child: _buildKPICardSimple('CAPEX TOTAL', capexTotalStr, '€', Colors.indigo, isDark)),
+                        const SizedBox(width: 12),
+                        Expanded(child: _buildKPICardSimple('INYECCIÓN RED Y1', inyeccionRedMostrar, 'GWh', Colors.blue, isDark)),
+                        const SizedBox(width: 12),
+                        Expanded(child: _buildKPICardSimple('TIR ($_etiquetaDetalle)', tirMostrar, '%', Colors.teal, isDark)),
+                      ],
+                    ),
                   const SizedBox(height: 16),
+
+                  if (_modo == 'solo_fv') ...[
+                    _buildExplicacionSoloFv(isDark),
+                    const SizedBox(height: 16),
+                  ],
 
                   // Resumen Financiero
                   Row(
@@ -861,14 +1338,14 @@ class _DisenoOptimoAuditoriaScreenState extends State<DisenoOptimoAuditoriaScree
                               children: [
                                 Text('Resumen Financiero: AÑO 1', style: TextStyle(fontWeight: FontWeight.bold, color: isDark ? Colors.white : Colors.blueGrey)),
                                 Divider(color: isDark ? Colors.white24 : Colors.black12),
-                                _buildFilaFinanzas('Ingresos PPA', '$ingresosPpaY1 €', isDark, colorClaro: Colors.green),
+                                _buildFilaFinanzas(_modo == 'optimizar' ? 'Ingresos PPA' : 'Ingresos Bloque ($_etiquetaDetalle)', '$ingresosPpaY1 €', isDark, colorClaro: Colors.green),
                                 _buildFilaFinanzas('Ingresos Mercado', '$ingresosMktY1 €', isDark, colorClaro: Colors.green),
                                 _buildFilaFinanzas('Coste Red (Mercado)', '$costeRedY1 €', isDark, colorClaro: costeRedY1.startsWith('-') ? Colors.red : Colors.green),
                                 _buildFilaFinanzas('OPEX Anual', '-$opexY1 €', isDark, colorClaro: Colors.red),
                                 Divider(color: isDark ? Colors.white24 : Colors.black12, thickness: 1),
                                 _buildFilaFinanzas('Flujo de Caja Neto', '$flujoCajaY1 €', isDark, colorClaro: Colors.blueGrey, isBold: true),
                                 const SizedBox(height: 12),
-                                _buildFilaFinanzas('CAPEX Óptimo Total', '-$capexTotalStr €', isDark, colorClaro: Colors.redAccent, isBold: true),
+                                _buildFilaFinanzas(_modo == 'optimizar' ? 'CAPEX Óptimo Total' : 'CAPEX Total', '-$capexTotalStr €', isDark, colorClaro: Colors.redAccent, isBold: true),
                               ],
                             ),
                           ),
@@ -887,14 +1364,14 @@ class _DisenoOptimoAuditoriaScreenState extends State<DisenoOptimoAuditoriaScree
                               children: [
                                 Text('Resumen Vida Útil: ${_vidaUtilController.text} AÑOS', style: TextStyle(fontWeight: FontWeight.bold, color: isDark ? Colors.white : Colors.blueGrey)),
                                 Divider(color: isDark ? Colors.white24 : Colors.black12),
-                                _buildFilaFinanzas('Total Ingresos PPA', '$ingresosPpaLife €', isDark, colorClaro: Colors.green),
+                                _buildFilaFinanzas(_modo == 'optimizar' ? 'Total Ingresos PPA' : 'Total Ingresos Bloque', '$ingresosPpaLife €', isDark, colorClaro: Colors.green),
                                 _buildFilaFinanzas('Total Mercado', '$ingresosMktLife €', isDark, colorClaro: Colors.green),
                                 _buildFilaFinanzas('Total Coste Red', '$costeRedLife €', isDark, colorClaro: costeRedLife.startsWith('-') ? Colors.red : Colors.green),
                                 _buildFilaFinanzas('Total OPEX', '-$opexLife €', isDark, colorClaro: Colors.red),
-                                _buildFilaFinanzas('Coste Reemplazo BESS', '-$reemplazoLife €', isDark, colorClaro: Colors.red),
+                                if (_modo != 'solo_fv') _buildFilaFinanzas('Coste Reemplazo BESS', '-$reemplazoLife €', isDark, colorClaro: Colors.red),
                                 Divider(color: isDark ? Colors.white24 : Colors.black12),
                                 _buildFilaFinanzas('Beneficio de Operación', '$beneficioNetoLife €', isDark, colorClaro: Colors.blueGrey, isBold: true),
-                                _buildFilaFinanzas('CAPEX Óptimo Total', '-$capexTotalStr €', isDark, colorClaro: Colors.redAccent),
+                                _buildFilaFinanzas(_modo == 'optimizar' ? 'CAPEX Óptimo Total' : 'CAPEX Total', '-$capexTotalStr €', isDark, colorClaro: Colors.redAccent),
                                 Divider(color: isDark ? Colors.white24 : Colors.black12, thickness: 1),
                                 _buildFilaFinanzas(
                                   'Beneficio Neto Total',
