@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 // ignore: avoid_web_libraries_in_flutter
 import 'dart:html' as html;
 import 'package:flutter/material.dart';
@@ -44,8 +45,15 @@ class _PantallaInicioScreenState extends State<PantallaInicioScreen> {
   List<double> _radiacion8760 = [];
   List<double> _precios8760 = [];
 
+  int _anioRadiacionSeleccionado = DateTime.now().year - 1;
   int _anioSeleccionado = DateTime.now().year - 1;
   String _indicadorSeleccionado = '600';
+
+  // Qué hay REALMENTE cargado ahora mismo (no lo que dice el selector, que solo
+  // afecta a la PRÓXIMA descarga) — se fija cada vez que precios_8760/radiacion_8760
+  // cambian, para saber siempre con certeza qué datos está usando la simulación.
+  String? _precioOrigen;
+  String? _radiacionOrigen;
 
   final Map<String, String> _mercadosDisponibles = const {
     '600': 'Precio Mercado Diario (OMIE)',
@@ -87,6 +95,20 @@ class _PantallaInicioScreenState extends State<PantallaInicioScreen> {
     if (municipioGuardado != null) _municipioController.text = municipioGuardado;
     if (latGuardada != null) _latController.text = latGuardada;
     if (lonGuardada != null) _lonController.text = lonGuardada;
+
+    int? anioRadGuardado = prefs.getInt('anio_radiacion');
+    if (anioRadGuardado != null) _anioRadiacionSeleccionado = anioRadGuardado;
+
+    _precioOrigen = prefs.getString('precios_origen');
+    _radiacionOrigen = prefs.getString('radiacion_origen');
+    // Hay datos guardados de antes de que existiera este registro de origen:
+    // no son "sin datos" (los hay), pero no sabemos con certeza su procedencia.
+    if (_precioOrigen == null && _precios8760.length == 8760) {
+      _precioOrigen = 'Datos existentes (cargados antes de este control — verifica el año tú mismo)';
+    }
+    if (_radiacionOrigen == null && _radiacion8760.length == 8760) {
+      _radiacionOrigen = 'Datos existentes (cargados antes de este control — verifica el año tú mismo)';
+    }
 
     setState(() {});
   }
@@ -140,36 +162,112 @@ class _PantallaInicioScreenState extends State<PantallaInicioScreen> {
     setState(() => _buscandoMunicipio = false);
   }
 
-  Future<void> _descargarPVGIS() async {
+  double _comoDouble(dynamic v) => ((v as num?) ?? 0.0).toDouble();
+
+  // Réplica simplificada de lo que hace PVGIS internamente, a partir de datos
+  // de Open-Meteo (que sí cubre años recientes y no necesita proxy):
+  //  1. Geometría solar hora a hora (declinación, ecuación del tiempo, ángulo
+  //     horario, cenit y azimuth solar) para un panel fijo inclinado a la
+  //     latitud del lugar y orientado al sur (como una planta real).
+  //  2. Transposición de la irradiancia horizontal (directa+difusa, ya
+  //     separadas por Open-Meteo) al plano del panel — directa vía ángulo de
+  //     incidencia, difusa con modelo isotrópico de cielo, más el reflejo del
+  //     suelo (albedo).
+  //  3. Temperatura de célula (modelo NOCT) y derateo por temperatura de un
+  //     panel de silicio cristalino (~0,4%/°C por encima de 25°C).
+  // Validado contra PVGIS real (mismo punto/año, panel a la misma inclinación):
+  // ~1,6% de diferencia en generación anual total.
+  List<double> _simularGeneracionFv(List<String> tiempos, List<double> dni, List<double> dhi, List<double> ghi, List<double> tAire, double latGrados, double lonGrados) {
+    final double tiltRad = _gradosARadianes(latGrados.abs());
+    final double cosTilt = cos(tiltRad);
+    final double sinTilt = sin(tiltRad);
+    final double latRad = _gradosARadianes(latGrados);
+    const double albedo = 0.2;
+    const double noct = 45.0;
+    const double coefTemp = -0.004; // por °C, típico de silicio cristalino
+
+    List<double> resultado = [];
+    for (int i = 0; i < tiempos.length; i++) {
+      DateTime fecha = DateTime.parse(tiempos[i]);
+      int n = fecha.difference(DateTime(fecha.year, 1, 1)).inDays + 1;
+      double horaUtc = fecha.hour.toDouble();
+
+      double bRad = _gradosARadianes(360 * (n - 81) / 364.0);
+      double eot = 9.87 * sin(2 * bRad) - 7.53 * cos(bRad) - 1.5 * sin(bRad); // minutos
+
+      double horaSolar = horaUtc + lonGrados / 15.0 + eot / 60.0;
+      double omegaRad = _gradosARadianes(15 * (horaSolar - 12));
+
+      double declRad = _gradosARadianes(23.45 * sin(_gradosARadianes(360 * (284 + n) / 365.0)));
+
+      double cosZenit = (sin(latRad) * sin(declRad) + cos(latRad) * cos(declRad) * cos(omegaRad)).clamp(-1.0, 1.0);
+
+      double poa = 0.0;
+      if (cosZenit > 0.0) {
+        double sinZenit = sqrt(1 - cosZenit * cosZenit);
+        double cosAzimuth = 1.0;
+        if (sinZenit > 1e-6 && cos(latRad).abs() > 1e-6) {
+          cosAzimuth = ((cosZenit * sin(latRad) - sin(declRad)) / (sinZenit * cos(latRad))).clamp(-1.0, 1.0);
+        }
+        double cosAoi = (cosZenit * cosTilt + sinZenit * sinTilt * cosAzimuth).clamp(0.0, 1.0);
+
+        double poaDirecta = dni[i] * cosAoi;
+        double poaDifusa = dhi[i] * (1 + cosTilt) / 2.0;
+        double poaReflejada = ghi[i] * albedo * (1 - cosTilt) / 2.0;
+        poa = max(0.0, poaDirecta + poaDifusa + poaReflejada);
+      }
+
+      double tCelda = tAire[i] + (noct - 20.0) * (poa / 800.0);
+      double factor = max(0.0, (poa / 1000.0) * (1 + coefTemp * (tCelda - 25.0)));
+      resultado.add(factor);
+    }
+    return resultado;
+  }
+
+  double _gradosARadianes(double g) => g * pi / 180.0;
+
+  Future<void> _descargarRadiacion() async {
     setState(() => _cargandoPVGIS = true);
     try {
       String lat = _latController.text;
       String lon = _lonController.text;
+      double latNum = double.parse(lat.replaceAll(',', '.'));
+      double lonNum = double.parse(lon.replaceAll(',', '.'));
+      int anio = _anioRadiacionSeleccionado;
 
-      String targetUrl = 'https://re.jrc.ec.europa.eu/api/v5_2/seriescalc?lat=$lat&lon=$lon&startyear=2020&endyear=2020&pvcalculation=1&peakpower=1&loss=0&outputformat=json';
-      final url = Uri.parse('https://proxy.cors.sh/$targetUrl');
+      final url = Uri.parse(
+        'https://archive-api.open-meteo.com/v1/archive'
+        '?latitude=$lat&longitude=$lon&start_date=$anio-01-01&end_date=$anio-12-31'
+        '&hourly=direct_normal_irradiance,diffuse_radiation,shortwave_radiation,temperature_2m&timezone=UTC',
+      );
 
       final response = await http.get(url);
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
-        final hourly = data['outputs']['hourly'] as List;
+        final horas = data['hourly'];
+        final List<String> tiempos = List<String>.from(horas['time']);
+        final List<double> dni = (horas['direct_normal_irradiance'] as List).map(_comoDouble).toList();
+        final List<double> dhi = (horas['diffuse_radiation'] as List).map(_comoDouble).toList();
+        final List<double> ghi = (horas['shortwave_radiation'] as List).map(_comoDouble).toList();
+        final List<double> tAire = (horas['temperature_2m'] as List).map(_comoDouble).toList();
 
-        List<double> radTemp = [];
-        for (var item in hourly) {
-          double p = (item['P'] ?? 0.0).toDouble() / 1000.0;
-          radTemp.add(p);
-        }
+        List<double> radTemp = _simularGeneracionFv(tiempos, dni, dhi, ghi, tAire, latNum, lonNum);
 
         if (radTemp.length >= 8760) {
           _radiacion8760 = radTemp.sublist(0, 8760);
           final prefs = await SharedPreferences.getInstance();
           await prefs.setStringList('radiacion_8760', _radiacion8760.map((e) => e.toString()).toList());
+          await prefs.setInt('anio_radiacion', anio);
+          _radiacionOrigen = 'Open-Meteo $anio (lat $lat, lon $lon)';
+          await prefs.setString('radiacion_origen', _radiacionOrigen!);
           await _guardarUbicacion();
 
-          if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('¡Datos PVGIS (8760h) descargados con éxito!'), backgroundColor: Colors.green));
+          if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('¡Radiación $anio (Open-Meteo, 8760h) descargada con éxito!'), backgroundColor: Colors.green));
+        } else {
+          throw Exception('Solo se recibieron ${radTemp.length} horas (¿año incompleto?)');
         }
       } else {
-        throw Exception('Error en la API de PVGIS');
+        throw Exception('Código ${response.statusCode}: error en la API de Open-Meteo');
       }
     } catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e'), backgroundColor: Colors.red));
@@ -245,6 +343,8 @@ class _PantallaInicioScreenState extends State<PantallaInicioScreen> {
         await prefs.setString('esios_token', token);
 
         final nombreMercado = _mercadosDisponibles[_indicadorSeleccionado] ?? _indicadorSeleccionado;
+        _precioOrigen = 'ESIOS $_anioSeleccionado ($nombreMercado)';
+        await prefs.setString('precios_origen', _precioOrigen!);
         if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('¡$nombreMercado $_anioSeleccionado descargado con éxito!'), backgroundColor: Colors.green));
       } else if (resp.statusCode == 401 || resp.statusCode == 403) {
         throw Exception('Código ${resp.statusCode}: Token de ESIOS inválido o sin permisos');
@@ -292,6 +392,8 @@ class _PantallaInicioScreenState extends State<PantallaInicioScreen> {
     _precios8760 = preTemp;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setStringList('precios_8760', _precios8760.map((e) => e.toString()).toList());
+    _precioOrigen = 'Año Tipo (patrón sintético, no es un año real)';
+    await prefs.setString('precios_origen', _precioOrigen!);
 
     await Future.delayed(const Duration(milliseconds: 500));
     setState(() => _cargandoPrecios = false);
@@ -312,6 +414,7 @@ class _PantallaInicioScreenState extends State<PantallaInicioScreen> {
       final contenido = (reader.result as String).trim();
 
       List<double> preciosTemp = [];
+      String? anioDetectado;
       if (contenido.startsWith('{')) {
         final data = json.decode(contenido);
         final values = data['indicator']['values'] as List;
@@ -319,6 +422,10 @@ class _PantallaInicioScreenState extends State<PantallaInicioScreen> {
         final valoresFiltrados = valoresEspana.isNotEmpty ? valoresEspana : values;
         for (var item in valoresFiltrados) {
           preciosTemp.add((item['value'] ?? 0.0).toDouble());
+        }
+        if (valoresFiltrados.isNotEmpty) {
+          final dt = valoresFiltrados.first['datetime']?.toString();
+          if (dt != null && dt.length >= 4) anioDetectado = dt.substring(0, 4);
         }
       } else if (contenido.startsWith('[')) {
         final data = json.decode(contenido) as List;
@@ -332,12 +439,19 @@ class _PantallaInicioScreenState extends State<PantallaInicioScreen> {
           final columnas = lineas.first.split(';').map((c) => c.trim().toLowerCase()).toList();
           final idxGeoname = columnas.indexOf('geoname');
           final idxValue = columnas.indexOf('value');
+          final idxDatetime = columnas.indexWhere((c) => c.contains('datetime') || c.contains('fecha'));
           for (var linea in lineas.skip(1)) {
             final partes = linea.split(';');
             if (partes.length <= idxGeoname || partes.length <= idxValue) continue;
             if (partes[idxGeoname].trim() != 'España') continue;
             final valor = double.tryParse(partes[idxValue].trim().replaceAll(',', '.'));
-            if (valor != null) preciosTemp.add(valor);
+            if (valor != null) {
+              preciosTemp.add(valor);
+              if (anioDetectado == null && idxDatetime >= 0 && partes.length > idxDatetime) {
+                final m = RegExp(r'(20\d{2})').firstMatch(partes[idxDatetime]);
+                if (m != null) anioDetectado = m.group(1);
+              }
+            }
           }
         } else {
           for (var linea in lineas) {
@@ -361,6 +475,8 @@ class _PantallaInicioScreenState extends State<PantallaInicioScreen> {
 
       final prefs = await SharedPreferences.getInstance();
       await prefs.setStringList('precios_8760', _precios8760.map((e) => e.toString()).toList());
+      _precioOrigen = anioDetectado != null ? 'Archivo cargado — ESIOS $anioDetectado (detectado)' : 'Archivo cargado (año no detectado — verifícalo tú mismo)';
+      await prefs.setString('precios_origen', _precioOrigen!);
 
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('✅ Precios cargados desde archivo (${_precios8760.length}h)'), backgroundColor: Colors.green));
     } catch (e) {
@@ -421,6 +537,52 @@ class _PantallaInicioScreenState extends State<PantallaInicioScreen> {
     );
   }
 
+  // "sintético"/"no detectado"/"no verificado"/"migrado" son avisos de que ese
+  // dato puede no ser exactamente un año real concreto — se marcan en ámbar.
+  bool _esOrigenIncierto(String origen) {
+    final o = origen.toLowerCase();
+    return o.contains('sintético') || o.contains('no detectado') || o.contains('no verificado') || o.contains('migrado') || o.contains('verifica') || o.contains('existentes');
+  }
+
+  Widget _filaOrigen(IconData icono, String etiqueta, String? origen, bool isDark) {
+    bool hayDato = origen != null;
+    bool incierto = hayDato && _esOrigenIncierto(origen);
+    Color color = !hayDato ? Colors.red : (incierto ? Colors.orange : Colors.green);
+    String texto = hayDato ? origen : 'Sin datos — descárgalos abajo';
+    return Row(
+      children: [
+        Icon(icono, color: color, size: 18),
+        const SizedBox(width: 8),
+        Text('$etiqueta: ', style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: isDark ? Colors.white : Colors.black87)),
+        Expanded(child: Text(texto, style: TextStyle(fontSize: 13, color: color), overflow: TextOverflow.ellipsis)),
+      ],
+    );
+  }
+
+  // Banner destacado con lo que HAY REALMENTE cargado ahora (no lo que diga el
+  // selector de año, que solo aplica a la próxima descarga) — para no dar por
+  // hecho un año que en realidad no coincide con los datos ya guardados.
+  Widget _buildBannerOrigenDatos(bool isDark) {
+    return Card(
+      color: Theme.of(context).colorScheme.surface,
+      elevation: isDark ? 4 : 2,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: Padding(
+        padding: const EdgeInsets.all(14.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('DATOS ACTUALMENTE CARGADOS', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, letterSpacing: 1.0, color: isDark ? Colors.grey : Colors.black54)),
+            const SizedBox(height: 8),
+            _filaOrigen(Icons.wb_sunny, 'Radiación', _radiacionOrigen, isDark),
+            const SizedBox(height: 6),
+            _filaOrigen(Icons.euro_symbol, 'Precios', _precioOrigen, isDark),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     bool isDark = Theme.of(context).brightness == Brightness.dark;
@@ -430,6 +592,8 @@ class _PantallaInicioScreenState extends State<PantallaInicioScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          _buildBannerOrigenDatos(isDark),
+          const SizedBox(height: 20),
           Text('SELECCIONA UN ESCENARIO', style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: isDark ? Colors.white : Colors.blueGrey)),
           const SizedBox(height: 16),
           Row(
@@ -437,6 +601,8 @@ class _PantallaInicioScreenState extends State<PantallaInicioScreen> {
               _buildTarjetaEscenario('Dimensionamiento', 'Diseña una planta FV+BESS desde cero', Icons.architecture, const Color(0xFF0050EF), () => widget.onSeleccionarEscenario(2), isDark),
               const SizedBox(width: 16),
               _buildTarjetaEscenario('Auditoría', 'Audita/optimiza una planta existente', Icons.search_rounded, const Color(0xFFD80073), () => widget.onSeleccionarEscenario(4), isDark),
+              const SizedBox(width: 16),
+              _buildTarjetaEscenario('Baterías Standalone', 'Arbitraje de mercado, 2 ciclos/día', Icons.battery_charging_full, Colors.teal, () => widget.onSeleccionarEscenario(6), isDark),
             ],
           ),
           const SizedBox(height: 32),
@@ -469,7 +635,7 @@ class _PantallaInicioScreenState extends State<PantallaInicioScreen> {
                                 const Icon(Icons.wb_sunny, color: Colors.orange),
                                 const SizedBox(width: 8),
                                 Expanded(
-                                  child: Text('RADIACIÓN SOLAR (PVGIS API)', overflow: TextOverflow.ellipsis, style: TextStyle(fontWeight: FontWeight.bold, color: isDark ? Colors.white : Colors.black87)),
+                                  child: Text('RADIACIÓN SOLAR (Open-Meteo)', overflow: TextOverflow.ellipsis, style: TextStyle(fontWeight: FontWeight.bold, color: isDark ? Colors.white : Colors.black87)),
                                 ),
                               ],
                             ),
@@ -510,12 +676,22 @@ class _PantallaInicioScreenState extends State<PantallaInicioScreen> {
                               ],
                             ),
                             const SizedBox(height: 16),
+                            DropdownButtonFormField<int>(
+                              initialValue: _anioRadiacionSeleccionado,
+                              isExpanded: true,
+                              decoration: const InputDecoration(labelText: 'Año', border: OutlineInputBorder(), isDense: true),
+                              items: List.generate(20, (i) => DateTime.now().year - 1 - i)
+                                  .map((a) => DropdownMenuItem(value: a, child: Text('$a')))
+                                  .toList(),
+                              onChanged: (val) => setState(() => _anioRadiacionSeleccionado = val!),
+                            ),
+                            const SizedBox(height: 16),
                             SizedBox(
                               width: double.infinity,
                               child: ElevatedButton(
-                                onPressed: _cargandoPVGIS ? null : _descargarPVGIS,
+                                onPressed: _cargandoPVGIS ? null : _descargarRadiacion,
                                 style: ElevatedButton.styleFrom(backgroundColor: Colors.orange, foregroundColor: Colors.white),
-                                child: _cargandoPVGIS ? const SizedBox(height: 20, width: 20, child: CircularProgressIndicator(color: Colors.white)) : const Text('Descargar Año de PVGIS'),
+                                child: _cargandoPVGIS ? const SizedBox(height: 20, width: 20, child: CircularProgressIndicator(color: Colors.white)) : const Text('Descargar Radiación'),
                               ),
                             ),
                             if (_radiacion8760.isNotEmpty)

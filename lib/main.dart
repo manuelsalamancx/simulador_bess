@@ -8,6 +8,7 @@ import 'dashboard_screen.dart';
 import 'calculos_auditoria.dart';
 import 'dashboard_auditoria.dart';
 import 'diseno_optimo_auditoria.dart';
+import 'baterias_standalone.dart';
 
 final ValueNotifier<bool> isDarkModeNotifier = ValueNotifier(true);
 
@@ -26,11 +27,17 @@ Future<void> _migrarDatosAntiguos() async {
     final prefs = await SharedPreferences.getInstance();
     if (prefs.getStringList('radiacion_8760') == null) {
       final antigua = prefs.getStringList('radiacion_8760_aud') ?? prefs.getStringList('radiacion_8760_calc');
-      if (antigua != null) await prefs.setStringList('radiacion_8760', antigua);
+      if (antigua != null) {
+        await prefs.setStringList('radiacion_8760', antigua);
+        await prefs.setString('radiacion_origen', 'Migrado de una versión anterior (año no verificado)');
+      }
     }
     if (prefs.getStringList('precios_8760') == null) {
       final antigua = prefs.getStringList('precios_8760_aud') ?? prefs.getStringList('precios_8760_calc');
-      if (antigua != null) await prefs.setStringList('precios_8760', antigua);
+      if (antigua != null) {
+        await prefs.setStringList('precios_8760', antigua);
+        await prefs.setString('precios_origen', 'Migrado de una versión anterior (año no verificado)');
+      }
     }
     if (prefs.getString('ubicacion_provincia') == null) {
       final antigua = prefs.getString('ubicacion_provincia_aud') ?? prefs.getString('ubicacion_provincia_calc');
@@ -58,6 +65,7 @@ Future<void> _sembrarPreciosPorDefecto() async {
       final jsonStr = await rootBundle.loadString('assets/precios_default_aud.json');
       final List<dynamic> valores = json.decode(jsonStr);
       await prefs.setStringList('precios_8760', valores.map((e) => e.toString()).toList());
+      await prefs.setString('precios_origen', 'ESIOS 2025 (España, Precio Mercado Diario) — precargado de fábrica');
     }
   } catch (_) {
     // Si el asset no está disponible por algún motivo, simplemente no se precarga nada
@@ -122,8 +130,11 @@ class _MainLayoutState extends State<MainLayout> {
     const DashboardAuditoriaScreen(),     // 4
     const DisenoOptimoAuditoriaScreen(),  // 5
 
-    // --- SECCIÓN 3: AJUSTES ---
-    const AjustesScreen(),         // 6
+    // --- SECCIÓN 3: HERRAMIENTAS ---
+    const BateriasStandaloneScreen(),  // 6
+
+    // --- SECCIÓN 4: AJUSTES ---
+    const AjustesScreen(),         // 7
   ];
 
   // Usado desde la Pantalla de Inicio (no está dentro del Drawer, así que no cierra nada)
@@ -191,7 +202,11 @@ class _MainLayoutState extends State<MainLayout> {
             _buildDrawerItem(Icons.auto_fix_high, 'Diseño Óptimo', 5, isDark),
 
             const Divider(),
-            _buildDrawerItem(Icons.settings, 'Ajustes de Sistema', 6, isDark),
+            Padding(padding: const EdgeInsets.only(left: 16, top: 8, bottom: 8), child: Text('HERRAMIENTAS', style: TextStyle(color: isDark ? Colors.grey : Colors.blueGrey, fontSize: 12, fontWeight: FontWeight.bold))),
+            _buildDrawerItem(Icons.battery_charging_full, 'Baterías Standalone', 6, isDark),
+
+            const Divider(),
+            _buildDrawerItem(Icons.settings, 'Ajustes de Sistema', 7, isDark),
           ],
         ),
       ),
