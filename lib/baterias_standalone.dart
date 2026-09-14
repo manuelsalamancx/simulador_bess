@@ -32,9 +32,9 @@ class _BateriasStandaloneScreenState extends State<BateriasStandaloneScreen> {
 
   // Modo "exacta": horas concretas, fijas cada día del año
   Set<int> _horasCargaC1 = {2, 3};
-  Set<int> _horasDescargaC1 = {13, 14};
-  Set<int> _horasCargaC2 = {16, 17};
-  Set<int> _horasDescargaC2 = {21, 22};
+  Set<int> _horasDescargaC1 = {7, 8};
+  Set<int> _horasCargaC2 = {12, 13};
+  Set<int> _horasDescargaC2 = {20, 21};
 
   List<double> _precios8760 = [];
   bool _calculando = false;
@@ -83,9 +83,9 @@ class _BateriasStandaloneScreenState extends State<BateriasStandaloneScreen> {
       _descargaFinC2 = prefs.getInt('bs_descarga_fin_c2') ?? 23;
 
       _horasCargaC1 = (prefs.getStringList('bs_horas_carga_c1') ?? ['2', '3']).map(int.parse).toSet();
-      _horasDescargaC1 = (prefs.getStringList('bs_horas_descarga_c1') ?? ['13', '14']).map(int.parse).toSet();
-      _horasCargaC2 = (prefs.getStringList('bs_horas_carga_c2') ?? ['16', '17']).map(int.parse).toSet();
-      _horasDescargaC2 = (prefs.getStringList('bs_horas_descarga_c2') ?? ['21', '22']).map(int.parse).toSet();
+      _horasDescargaC1 = (prefs.getStringList('bs_horas_descarga_c1') ?? ['7', '8']).map(int.parse).toSet();
+      _horasCargaC2 = (prefs.getStringList('bs_horas_carga_c2') ?? ['12', '13']).map(int.parse).toSet();
+      _horasDescargaC2 = (prefs.getStringList('bs_horas_descarga_c2') ?? ['20', '21']).map(int.parse).toSet();
     });
     await _guardar();
     await _calcular();
@@ -156,6 +156,11 @@ class _BateriasStandaloneScreenState extends State<BateriasStandaloneScreen> {
     return {
       'precioCarga': opera ? precioCargaProm : 0.0,
       'precioDescarga': opera ? precioDescargaProm : 0.0,
+      // Spread en €/MWh: comparable directo con Precio Carga/Descarga (su resta).
+      // Spread en € (más abajo) es ese valor YA MULTIPLICADO por las horas de la
+      // batería ese día — es el dinero total, no otro precio distinto.
+      'spreadPorMwh': opera ? (precioDescargaProm - precioCargaProm) : 0.0,
+      'horas': horasCarga.length,
       'spread': opera ? spreadBruto : 0.0,
       'opera': opera,
       'horasCarga': opera ? horasTexto(horasCargaOrdenadas) : '',
@@ -207,9 +212,9 @@ class _BateriasStandaloneScreenState extends State<BateriasStandaloneScreen> {
         DateTime fecha = fechaBase.add(Duration(days: diaGlobal));
         filas.add({
           'fecha': fecha,
-          'precioCargaC1': c1['precioCarga'], 'precioDescargaC1': c1['precioDescarga'], 'spreadC1': spreadC1, 'operoC1': c1['opera'],
+          'precioCargaC1': c1['precioCarga'], 'precioDescargaC1': c1['precioDescarga'], 'spreadMwhC1': c1['spreadPorMwh'], 'horasC1': c1['horas'], 'spreadC1': spreadC1, 'operoC1': c1['opera'],
           'horasCargaC1': c1['horasCarga'], 'horasDescargaC1': c1['horasDescarga'],
-          'precioCargaC2': c2['precioCarga'], 'precioDescargaC2': c2['precioDescarga'], 'spreadC2': spreadC2, 'operoC2': c2['opera'],
+          'precioCargaC2': c2['precioCarga'], 'precioDescargaC2': c2['precioDescarga'], 'spreadMwhC2': c2['spreadPorMwh'], 'horasC2': c2['horas'], 'spreadC2': spreadC2, 'operoC2': c2['opera'],
           'horasCargaC2': c2['horasCarga'], 'horasDescargaC2': c2['horasDescarga'],
           'spreadTotal': spreadC1 + spreadC2,
         });
@@ -232,13 +237,17 @@ class _BateriasStandaloneScreenState extends State<BateriasStandaloneScreen> {
   void _exportarCsv() {
     if (_resultadosDiarios.isEmpty) return;
     StringBuffer sb = StringBuffer();
-    sb.writeln('Fecha;Horas Carga C1;Horas Descarga C1;Precio Carga C1;Precio Descarga C1;Spread C1;Operó C1;'
-        'Horas Carga C2;Horas Descarga C2;Precio Carga C2;Precio Descarga C2;Spread C2;Operó C2;Spread Total Dia');
+    sb.writeln('Fecha;'
+        'Horas Carga C1;Horas Descarga C1;Precio Carga C1 (€/MWh);Precio Descarga C1 (€/MWh);Spread C1 (€/MWh);Horas Batería C1;Spread Total C1 (€);Operó C1;'
+        'Horas Carga C2;Horas Descarga C2;Precio Carga C2 (€/MWh);Precio Descarga C2 (€/MWh);Spread C2 (€/MWh);Horas Batería C2;Spread Total C2 (€);Operó C2;'
+        'Spread Total Dia (€)');
     for (var fila in _resultadosDiarios) {
       DateTime f = fila['fecha'];
       String fechaStr = '${f.day.toString().padLeft(2, '0')}/${f.month.toString().padLeft(2, '0')}/${f.year}';
-      sb.writeln('$fechaStr;${fila['horasCargaC1']};${fila['horasDescargaC1']};${_csvNum(fila['precioCargaC1'])};${_csvNum(fila['precioDescargaC1'])};${_csvNum(fila['spreadC1'])};${_siNo(fila['operoC1'])};'
-          '${fila['horasCargaC2']};${fila['horasDescargaC2']};${_csvNum(fila['precioCargaC2'])};${_csvNum(fila['precioDescargaC2'])};${_csvNum(fila['spreadC2'])};${_siNo(fila['operoC2'])};${_csvNum(fila['spreadTotal'])}');
+      sb.writeln('$fechaStr;'
+          '${fila['horasCargaC1']};${fila['horasDescargaC1']};${_csvNum(fila['precioCargaC1'])};${_csvNum(fila['precioDescargaC1'])};${_csvNum(fila['spreadMwhC1'])};${fila['horasC1']};${_csvNum(fila['spreadC1'])};${_siNo(fila['operoC1'])};'
+          '${fila['horasCargaC2']};${fila['horasDescargaC2']};${_csvNum(fila['precioCargaC2'])};${_csvNum(fila['precioDescargaC2'])};${_csvNum(fila['spreadMwhC2'])};${fila['horasC2']};${_csvNum(fila['spreadC2'])};${_siNo(fila['operoC2'])};'
+          '${_csvNum(fila['spreadTotal'])}');
     }
     final bytes = utf8.encode(sb.toString());
     final blob = html.Blob([bytes], 'text/csv;charset=utf-8');
@@ -395,7 +404,8 @@ class _BateriasStandaloneScreenState extends State<BateriasStandaloneScreen> {
                           Expanded(
                             child: Text(
                               'Regla de operación: cada ciclo solo carga y descarga en los días donde el spread (ingreso de descarga − coste de carga) es de al menos ${formatoEuro(_umbralMinimoSpread, decimales: 0)} €. '
-                              'Si ese día el spread sería menor o negativo, ese ciclo no opera (ni carga ni descarga) y su spread queda en 0 €.',
+                              'Si ese día el spread sería menor o negativo, ese ciclo no opera (ni carga ni descarga) y su spread queda en 0 €.\n\n'
+                              'En el CSV: "Precio Carga/Descarga" son la media €/MWh de esas horas. "Spread (€/MWh)" es la resta directa de esos dos precios. "Spread Total (€)" es ese mismo spread multiplicado por las horas de batería usadas ese ciclo — por eso puede parecer mucho mayor que la simple resta de los dos precios.',
                               style: TextStyle(fontSize: 12, color: isDark ? Colors.white70 : Colors.black87),
                             ),
                           ),
